@@ -1,0 +1,1253 @@
+---
+title: "Figure 1: Bulk-RNA-Seq analysis in monocytes: 3h LPS vs 0h"
+author: "Alejandra Bodelon"
+format:
+  html:
+    toc: true
+    toc-location: left
+    embed-resources: true
+editor: visual
+---
+
+```{r packageload, echo=F, include=FALSE}
+
+#!/usr/bin/R
+
+# Load all the package
+library(readxl)
+library(signatureSearch)
+library(data.table)
+library(DESeq2) 
+library(ggplot2) 
+library(ggrepel) 
+library(biomaRt)
+library(tidyverse)
+library(dplyr)
+library(RUVSeq)
+library(vsn)
+library(pheatmap)
+library(RColorBrewer)
+library(ggVennDiagram) # Load ggVennDiagram
+library(gprofiler2)
+library(magrittr)
+library(tidyr)
+library(forcats) #for plotting
+library(officer)
+library(rvg)
+library(GO.db)
+library(plyr)
+library(reshape2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggsci)
+library(viridis)
+library(KEGGREST)
+library(biomaRt)
+library(fgsea)
+library(reactome.db)
+library(pathview) 
+library(pheatmap)
+library(ggvenn)
+library("pheatmap")
+library(ggplotify)
+library(ggpubr)
+
+SavePPT <-function(PPT,Plot,Name, width_1, height_1){
+  ggsave(paste0("Fig1/",Name),bg="white", width = width_1, height = height_1)
+  fig_vg <- dml(ggobj = Plot)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location(width = width_1, 
+                                                             height = height_1))
+  return(PPT)
+}
+
+PPT <- read_pptx()
+
+ColorNames=pal_nejm("default")(8)
+
+```
+
+# Analysis of bulk-RNA-Seq of monocytes: 3h LPS vs 0h
+
+## 1. Our data: in-vitro 3h LPS vs 0h monocytes
+
+### Data preparation
+
+We first use the read count per gene obtain using STAR to create the count matrix and the design table: **treatment + PatientID**, where we compare diseases excluding variance associated to patient id (paired analysis).
+
+```{r design_invitro, echo=F, message=FALSE, warning=F}
+
+## Create the count matrix + the experimental condition formula:
+
+# use the metadata file to obtain the specific samples to process
+metadataJIArnaSeq=data.frame(fread("Analysis_July2024/metadataJIArnaSeq_sex.txt"))
+rownames(metadataJIArnaSeq)=metadataJIArnaSeq$sampleName # add as rownames the sampleid
+
+# simplify patient id
+metadataJIArnaSeq$patient_id=sub("mono.*",".1",metadataJIArnaSeq$V1)
+metadataJIArnaSeq$patient_id=sub("LPS","",metadataJIArnaSeq$patient_id)
+metadataJIArnaSeq$patient_id=sub("exvivo","",metadataJIArnaSeq$patient_id)
+
+# order by treatment
+metadataJIArnaSeq=metadataJIArnaSeq[order(metadataJIArnaSeq$treatment),]
+metadataJIArnaSeq[metadataJIArnaSeq$treatment == "exvivo","treatment"]="Exvivo"
+
+print(metadataJIArnaSeq[,c(4,5,7,9,3)])
+
+Design=list()
+Design[["InVitro_LPS_vs_Exvivo"]]=metadataJIArnaSeq
+
+```
+
+```{r countmatrix_invitro, echo=F, include=FALSE}
+
+# save the PATH of the folder
+PATH_NAME="STAR_GeneCount_TwoPassMode/"
+
+# list all the files in the folder
+FileNames=data.table(list.files(PATH_NAME))
+FileNames$sample=sub("STAR_","",sub("ReadsPerGene.out.tab","",FileNames$V1))
+FileNames=FileNames[match(metadataJIArnaSeq$sampleName, FileNames$sample),]
+
+# select the specific files to use
+FileNames=FileNames[FileNames$sample %in% metadataJIArnaSeq$sampleName,]
+
+# create a list with all the counts by STAR for each condition and specie
+CountMatrix=data.table()
+for(File in FileNames$V1) { # for loop to open all the files in the ExpressOutputRNA-Seq PATH
+  SampleName=sub("STAR_",'',sub("ReadsPerGene.out.tab","",File)) # simplify the name
+  if(nrow(CountMatrix) == 0){ # if the matrix is empty
+    CountMatrix=fread(file=paste(PATH_NAME,File,sep="")) # open the count file
+    CountMatrix=CountMatrix[,c(1,4)] # select the columns
+    CountMatrix=CountMatrix[-c(1:4),] # remove unnecessary data
+    colnames(CountMatrix)=c("Geneid",SampleName) # change the column names
+  } else {
+    CountMatrix_2nd=fread(file=paste(PATH_NAME,File,sep="")) # open the count file
+    CountMatrix_2nd=CountMatrix_2nd[,c(1,4)] # select the columns
+    CountMatrix_2nd=CountMatrix_2nd[-c(1:4),] # remove unnecessary
+    colnames(CountMatrix_2nd)=c("Geneid",SampleName)  # change the column names
+    CountMatrix=merge(CountMatrix, CountMatrix_2nd, by="Geneid", all.x=T, all.y=T) # merge the counts for different samples by geneid
+    rm(CountMatrix_2nd)
+  }
+}
+
+CountMatrix=data.frame(CountMatrix) # transform as data.frame
+rownames(CountMatrix)=CountMatrix$Geneid # use geneid as rownames
+CountMatrix=CountMatrix[,-1] # remove geneid column
+
+# create the SummarizedExperiment class (design information) using the metadata file
+InfcolData=data.frame(treatment=factor(metadataJIArnaSeq$treatment),
+                      patient=factor(metadataJIArnaSeq$patient_id),
+                      row.names = rownames(metadataJIArnaSeq)) # and the disease and the cell
+unique(colnames(CountMatrix)==rownames(InfcolData)) # make sure the order is the same in count matrix and design matrix
+
+rm(FileNames, File, PATH_NAME, SampleName)
+
+```
+
+```{r coefficent_variation, echo=F, include=FALSE, eval=T}
+
+# creation of the DESeq object (DESeqDataSetFromMatrix) for visualization and exploration
+DESeqDataSet = DESeqDataSetFromMatrix(countData = CountMatrix, colData = InfcolData, design = ~ treatment + patient)
+Metadata=InfcolData
+
+# remove low expressed reads
+smallestGroupSize <- min(table(InfcolData$treatment)) # consider the smallest group size # consider the smallest group size
+keep <- rowSums(counts(DESeqDataSet) >= 10) >= smallestGroupSize # at least 10 reads
+DESeqDataSet_filtered <- DESeqDataSet[keep,]
+  
+# Perform the DESeq pipeline: sequencing depth normalization between the samples, 
+# gene - wise dispersion estimates across all samples, 
+# fits a negative binomial GLM and applies Wald statistics to each gene
+DESeq_RNA = DESeq(DESeqDataSet_filtered)
+  
+# extract normalized read counts
+NormalizedReadCounts=counts(DESeq_RNA, normalized=TRUE)
+
+# extract coefficient of variation
+CVPerGroup=as_tibble(wrMisc::rowGrpCV(NormalizedReadCounts, grp = InfcolData$treatment), rownames = "gene_id") %>%
+  tidyr::pivot_longer(cols = c(LPS, Exvivo), names_to = "treatment", values_to = "cv") %>%
+  filter(!is.na(cv)) %>%
+  group_by(treatment) %>%
+  summarise(MeanCV = mean(cv), .groups = "drop")
+
+rm(smallestGroupSize, keep, DESeq_RNA, DESeqDataSet_filtered, NormalizedReadCounts)
+
+```
+
+### Data Quality Control
+
+```{r data_qc_invitro, echo=FALSE, message=F, warning=F}
+#| label: data_qc_invitro
+#| fig-cap: "in vitro LPS and Exvivo monocytes"
+#| fig-subcap: 
+#|   - "Number of genes with more than 0 counts"
+#|   - "Markers per cell"
+#|   - "vsd data transformations"
+#|   - "Heatmap top 20 genes"
+#|   - "Heatmap of distances"
+#|   - "PCA"
+#|   - "PCA without batch effect"
+#|   - "Fitting model: log10 cook´s distance"
+#|   - "Fitting model: Distance estimates"
+#| layout-ncol: 2
+
+Markers=c("ENSG00000170458","ENSG00000010610","ENSG00000153563","ENSG00000172116","ENSG00000177455")
+
+MarkerFunction<-function(COUNT_Matrix, Markers, InfcolData){
+  Samples=colnames(COUNT_Matrix)
+  COUNT_Matrix$Name=sub("\\..*","",rownames(COUNT_Matrix))
+
+  # Human genome build used to map in STAR 
+  ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  ens_annotation <- getBM(attributes=c("ensembl_gene_id","external_gene_name","gene_biotype","chromosome_name",
+                                     "start_position","end_position","strand","description"),
+                        filters="ensembl_gene_id", values=sub("\\..*","",rownames(COUNT_Matrix)), mart=ensembl, uniqueRows=TRUE)
+  rownames(ens_annotation) <- ens_annotation$ensembl_gene_id
+  colnames(ens_annotation)=c("Name","external_gene_name","gene_biotype","chromosome_name","start_position","end_position","strand","description")
+
+  COUNT_Matrix_Names=merge(COUNT_Matrix, ens_annotation, all.x=T, by="Name")
+  
+  InfcolData$Sample=rownames(InfcolData)
+  
+  # plot of the genes with counts
+  SaveCount=data.table() # save
+  for(ColName in Samples){ # loop to enter each sample using the colname
+    SaveCount=rbind(SaveCount, data.table(Sample=ColName, # save in the table
+                                          Num=COUNT_Matrix_Names[COUNT_Matrix_Names$Name %in% Markers,ColName],
+                                          Gene=COUNT_Matrix_Names[COUNT_Matrix_Names$Name %in% Markers,]$external_gene_name,
+                                          Treatment=InfcolData[InfcolData$Sample == ColName,]$treatment))
+  }
+  
+  # ggplot of the number of genes with more than 0 reads in each gene
+  Plot=ggplot(SaveCount, aes(x=Sample, y=Num, fill = Sample)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 6), legend.position = "none") + facet_grid(Gene~Treatment, scales="free")
+  plot(Plot)
+}
+
+AnalyzeCellType <-function(COUNT, InfcolData, Markers){
+  # check number of counts per sample
+  CountPerSample=data.table(Sample=colnames(COUNT), Num=colSums(COUNT))
+  Plot=ggplot(CountPerSample, aes(x=Sample, y=Num, fill = Sample)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  plot(Plot)
+  
+  # prepare the dataset
+  DESeqDataSet = DESeqDataSetFromMatrix(countData = COUNT, colData = InfcolData, design = ~ treatment + patient)
+  
+  smallestGroupSize <- min(table(InfcolData$treatment)) # consider the smallest group size # consider the smallest group size
+  keep <- rowSums(counts(DESeqDataSet) >= 10) >= smallestGroupSize # at least 10 reads
+  DESeqDataSet_filtered <- DESeqDataSet[keep,]
+  print("Number of genes with >sum(10) reads ")
+  print(paste0("in at least ",smallestGroupSize, " groups: ", nrow(DESeqDataSet_filtered)))
+  
+  # plot of the genes with counts
+  SaveCount=data.table() # save
+  for(ColName in colnames(COUNT)){ # loop to enter each sample using the colname
+    SaveCount=rbind(SaveCount, data.table(Sample=ColName, # save in the table
+                                          Num=length(COUNT[,ColName][COUNT[,ColName]>0])))
+  }
+  
+  rm(DESeqDataSet)
+  # ggplot of the number of genes with more than 0 reads in each gene
+  Plot=ggplot(SaveCount, aes(x=Sample, y=Num, fill = Sample)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_hline(yintercept=1500, linetype="dashed", color = "red")
+  plot(Plot)
+  
+  # Perform the DESeq pipeline: sequencing depth normalization between the samples, 
+  # gene - wise dispersion estimates across all samples, 
+  # fits a negative binomial GLM and applies Wald statistics to each gene
+  DESeq_RNA = DESeq(DESeqDataSet_filtered)
+  
+  # Get normalized counts
+  # Check the markers
+  # MarkerFunction(as.data.frame(counts(DESeq_RNA, normalized=TRUE)), Markers, InfcolData)
+  
+  ## transform the data
+  vsd <- vst(DESeqDataSet_filtered, blind=FALSE)
+  meanSdPlot(assay(vsd))$gg
+
+  ## Explore the data:
+  
+  # select 20 top rowmean count genes
+  select <- order(rowMeans(counts(DESeq_RNA,normalized=TRUE)),decreasing=TRUE)[1:20]
+    
+  # produce the data table
+  df <- as.data.frame(colData(DESeq_RNA)[,"treatment"], row.names = rownames(colData(DESeqDataSet_filtered)))
+  
+  # print the heatmaps with the best transformation
+  pheatmap(assay(vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE, cluster_cols=FALSE, annotation_col=df)
+  
+  # sample-to-sample distance
+  sampleDists <- dist(t(assay(vsd))) # compute the distance between the samples
+  
+  sampleDistMatrix <- as.matrix(sampleDists) # as matrix
+  rownames(sampleDistMatrix) <- paste(vsd$treatment, sep="-") # add rownames
+  colnames(sampleDistMatrix) <- NULL # remove colnames
+  colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255) # select color
+  pheatmap(sampleDistMatrix, # perform the matrix distance
+           clustering_distance_rows=sampleDists,
+           clustering_distance_cols=sampleDists,
+           col=colors)
+  
+  # PCA before patient correction
+  pcaData <- plotPCA(vsd, intgroup=c("treatment"), returnData=TRUE) # extract the data
+  percentVar <- round(100 * attr(pcaData, "percentVar")) # compute the percentage
+  # add patient
+  InfcolData$name=rownames(InfcolData)
+  pcaData_merged=merge(pcaData, InfcolData, all.x=T)
+    
+  Plot=ggplot(pcaData_merged, aes(PC1, PC2, color=treatment, shape = patient)) + # perform the PCA
+    geom_point(size=1) +
+    xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+    ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+    coord_fixed()
+  plot(Plot)
+  
+  # correct by batch effect: patient
+  mat <- assay(vsd)
+  mm <- model.matrix(~treatment, colData(vsd))
+  mat <- limma::removeBatchEffect(mat, batch=vsd$patient, design=mm)
+  assay(vsd) <- mat
+
+  # PCA after patient correction
+  pcaData <- plotPCA(vsd, intgroup=c("treatment"), returnData=TRUE) # extract the data
+  percentVar <- round(100 * attr(pcaData, "percentVar")) # compute the percentage
+  # add patient
+  InfcolData$name=rownames(InfcolData)
+  pcaData_merged=merge(pcaData, InfcolData, all.x=T)
+
+  Plot=ggplot(pcaData_merged, aes(PC1, PC2, color=patient, shape = treatment)) + # perform the PCA
+    geom_point(size=1.75) +
+    xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+    ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+    coord_fixed() + theme_bw() + theme(panel.border = element_rect(fill = NA),
+                                            axis.line = element_line()) +
+    scale_y_continuous(limits = c(-25,25), 
+                       breaks = c(-20,-10, 0, 10, 20)) + 
+    scale_x_continuous(limits = c(-60,60), 
+                       breaks = c(-60, -40, -20, 0, 20, 40, 60)) +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), 
+              axis.line = element_line(colour = "black"), 
+          legend.position = "none")
+  plot(Plot)
+  SavePPT(PPT, Plot, "PCA.pdf", 4, 6)
+
+  ## Fitting model
+  # outliers and dispersion fitting plot
+  par(mar=c(8,5,2,2))
+  boxplot(log10(assays(DESeq_RNA)[["cooks"]]), range=0, las=2, plot=TRUE)
+  plotDispEsts(DESeq_RNA)
+  return(vsd)
+}
+
+vsd_list=list()
+vsd_list[["InVitro_LPS_vs_Exvivo"]]=AnalyzeCellType(CountMatrix, InfcolData, Markers)
+
+```
+
+### Pairwise comparisons
+
+We then perform the normalization and pairwise comparison of 3h LPS vs 0h and we also include gene annotation.
+
+```{r pairwisecomparisons_invitro, echo=FALSE, message=FALSE, warning=F, include=F}
+
+#### Pairwise comparisons
+
+# Create a function for the differential expression analysis
+DEAnalysis <- function(Sample, CompareTo, InfcolData, COUNT){
+  # change the reference
+  InfcolData$treatment = relevel(factor(InfcolData$treatment), ref = as.character(CompareTo))
+  print(paste0("New reference genome: ", CompareTo))
+  
+  # make sure the order is the same in count matrix and design matrix
+  print(unique(colnames(COUNT)==rownames(InfcolData))) 
+
+  # Create the DESeqDataSet object
+  DESeqDataSet=DESeqDataSetFromMatrix(countData = COUNT, colData = InfcolData, design = ~ treatment + patient)
+
+  # remove low expressed reads
+  smallestGroupSize <- min(table(InfcolData$treatment)) # consider the smallest group size # consider the smallest group size
+  keep <- rowSums(counts(DESeqDataSet) >= 10) >= smallestGroupSize # at least 10 reads
+  DESeqDataSet_filtered <- DESeqDataSet[keep,]
+  
+  # Perform the DESeq pipeline: sequencing depth normalization between the samples, 
+  # gene - wise dispersion estimates across all samples, 
+  # fits a negative binomial GLM and applies Wald statistics to each gene
+  DESeq_RNA = DESeq(DESeqDataSet_filtered)
+  
+  # extract normalized read counts
+  NormalizedReadCounts=data.table(GeneID=rownames(DESeq_RNA) ,counts(DESeq_RNA, normalized=TRUE))
+  
+  # get the possible comparisons
+  PossibleComp=resultsNames(DESeq_RNA) # Lists the coefficients (check if relevel works okay)
+  print(PossibleComp)
+  
+  # Detect the comparison to do
+  Comparison=paste0("treatment_", Sample, "_vs_", CompareTo)
+  ComparisonToCompare=PossibleComp[grep(Comparison,PossibleComp)]
+  print(ComparisonToCompare)
+  
+  # Get the result of the comparion with an alpha of 0.05 as a cut-off
+  Result = results(DESeq_RNA, name=ComparisonToCompare, alpha = 0.05)
+
+  # Get the shrinkaged Log fold change
+  LfcShrink = lfcShrink(DESeq_RNA, coef=ComparisonToCompare, type="apeglm") # the apeglm new method was used
+
+  # Create the data.table
+  DataFramePadj=data.frame(Result) 
+  DataFrameLfcShrink=data.frame(LfcShrink) # Create the data.table
+  
+  # Add gene names in the data.table
+  DataFramePadj$Name=rownames(DataFramePadj) 
+  DataFrameLfcShrink$Name=rownames(DataFrameLfcShrink)
+  
+  # Merge p-adjusted p-values from results to the shrinkaged log2FC
+  DataFrame=merge(DataFrameLfcShrink[,c(2,6)],DataFramePadj[,c(5,6,7)])
+  
+  # Add in a list all the results
+  List = list(ComparisonToCompare, DataFrame, NormalizedReadCounts)
+  return(List) # Return the data.frame
+}
+
+FinalResultTable<-function(Sample, CompareTo, colData_RNA, COUNT_ALL, ens_annotation, Type){
+    DEResults=list()
+    # Comparison to do
+    ListResults=DEAnalysis(Sample, CompareTo, colData_RNA, COUNT_ALL) # Perform the DE analysis with the function
+    # get the results of the comparison
+    ResultsComparison=ListResults[[2]]
+    print(paste("Significant:", nrow(ResultsComparison[which(ResultsComparison$padj < 0.05),])))
+    # simplify the names
+    ResultsComparison$ensembl_id=ResultsComparison$Name
+    ResultsComparison$Name=sub("\\..*","",ResultsComparison$Name)
+    # add the annotations
+    ResultsComparisonAnnot=merge(ResultsComparison, ens_annotation, all.x=T, by="Name")
+    ResultsComparisonAnnot=ResultsComparisonAnnot[,c(1,5:12,2:4)]
+    DEResults[[paste0(Type,sub("treatment","",ListResults[[1]]))]]=list(ResultsComparisonAnnot,ListResults[[3]]) # Save the results into a list
+    # Save the results into a file
+    write.table(ResultsComparisonAnnot, file=paste0("Deseq2Results/", paste0(sub("treatment_","DEG",Type,ListResults[[1]]),".txt")), sep = "\t",quote = F, row.names = F)
+    
+    return(DEResults)
+}
+
+# Create a function to perform the analysis all hybrids
+Loop_Comparisons <- function(colData_RNA, COUNT_ALL, Type){
+  
+  # Get all interesting conditions
+  TreatmentSamples=unique(colData_RNA$treatment)[-grep("Exvivo",unique(colData_RNA$treatment))]
+  HealthySamples=unique(colData_RNA$treatment)[grep("Exvivo",unique(colData_RNA$treatment))]
+  
+  # Human genome build used to map in STAR 
+  ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+  ens_annotation <- getBM(attributes=c("ensembl_gene_id","external_gene_name","gene_biotype","chromosome_name",
+                                       "start_position","end_position","strand","description"),
+                          filters="ensembl_gene_id", values=sub("\\..*","",rownames(COUNT_ALL)), mart=ensembl, uniqueRows=TRUE)
+  rownames(ens_annotation) <- ens_annotation$ensembl_gene_id
+  colnames(ens_annotation)=c("Name","external_gene_name","gene_biotype","chromosome_name","start_position","end_position","strand","description")
+
+  # Create a list to save all the results for the comparison between parental species and hybrids
+  DEResults=list()
+  for(Treatment in TreatmentSamples){ # For loop to enter to each disease
+    # Final results
+    DEResults=c(DEResults, FinalResultTable(Treatment, HealthySamples, colData_RNA, COUNT_ALL, ens_annotation, Type))
+  }
+  
+  return(DEResults)
+}
+
+DEResults=Loop_Comparisons(InfcolData, CountMatrix, "InVitro")
+
+```
+
+## 2. GSE87290: in vivo LPS challenge vs base line PBMCs
+
+### Data preparation
+
+We first use the read count per gene obtain using STAR to create the count matrix and the design table: **treatment + patientID**, where we compare diseases excluding variance associated to patient id (paired analysis).
+
+```{r design_invivo, echo=F, message=FALSE, warning=F}
+
+## Create the count matrix + the experimental condition formula:
+
+# use the metadata file to obtain the specific samples to process
+metadataJIArnaSeq=data.frame(fread("BulkRNASeq_HumanLPS/metadataJIArnaSeq.txt", header = T))
+rownames(metadataJIArnaSeq)=metadataJIArnaSeq$sampleName # add as rownames the sampleid
+metadataJIArnaSeq$treatment=sub("NS","Exvivo",metadataJIArnaSeq$treatment)
+metadataJIArnaSeq=metadataJIArnaSeq[metadataJIArnaSeq$inflammatory_response == "High",]
+metadataJIArnaSeq
+
+Design[["InVivo_LPS_vs_Exvivo"]]=metadataJIArnaSeq
+```
+
+```{r countmatrix_invivo, echo=F, include=T}
+
+# save the PATH of the folder
+PATH_NAME="BulkRNASeq_HumanLPS/GeneCount/"
+
+# list all the files in the folder
+FileNames=data.table(list.files(PATH_NAME))
+FileNames$sample=sub("_.*","",FileNames$V1)
+FileNames=FileNames[FileNames$sample %in% metadataJIArnaSeq$sampleName,]
+metadataJIArnaSeq=metadataJIArnaSeq[match(FileNames$sample, metadataJIArnaSeq$sampleName),]
+
+# create a list with all the counts by STAR for each condition and specie
+CountMatrix=data.table()
+for(File in FileNames$V1) { # for loop to open all the files in the ExpressOutputRNA-Seq PATH
+  SampleName=sub("STAR_",'',sub("_1ReadsPerGene.out.tab","",File)) # simplify the name
+  if(nrow(CountMatrix) == 0){ # if the matrix is empty
+    CountMatrix=fread(file=paste(PATH_NAME,File,sep="")) # open the count file
+    CountMatrix=CountMatrix[,c(1,4)] # select the columns
+    CountMatrix=CountMatrix[-c(1:4),] # remove unnecessary data
+    colnames(CountMatrix)=c("Geneid",SampleName) # change the column names
+  } else {
+    CountMatrix_2nd=fread(file=paste(PATH_NAME,File,sep="")) # open the count file
+    CountMatrix_2nd=CountMatrix_2nd[,c(1,4)] # select the columns
+    CountMatrix_2nd=CountMatrix_2nd[-c(1:4),] # remove unnecessary
+    colnames(CountMatrix_2nd)=c("Geneid",SampleName)  # change the column names
+    CountMatrix=merge(CountMatrix, CountMatrix_2nd, by="Geneid", all.x=T, all.y=T) # merge the counts for different samples by geneid
+    rm(CountMatrix_2nd)
+  }
+}
+
+CountMatrix=data.frame(CountMatrix) # transform as data.frame
+rownames(CountMatrix)=CountMatrix$Geneid # use geneid as rownames
+CountMatrix=CountMatrix[,-1] # remove geneid column
+
+# create the SummarizedExperiment class (design information) using the metadata file
+InfcolData=data.frame(treatment=factor(metadataJIArnaSeq$treatment),
+                      patient=factor(metadataJIArnaSeq$patient_id),
+                      row.names = rownames(metadataJIArnaSeq)) # and the disease and the cell
+unique(colnames(CountMatrix)==rownames(InfcolData)) # make sure the order is the same in count matrix and design matrix
+
+rm(FileNames, File, PATH_NAME, SampleName)
+
+```
+
+### Data Quality Control
+
+```{r data_qc_invivo, echo=FALSE, message=F, eval=T}
+#| label: data_qc_invivo
+#| fig-cap: "in vivo LPS and Exvivo PBMCs"
+#| fig-subcap: 
+#|   - "Number of genes with more than 0 counts"
+#|   - "Markers per cell"
+#|   - "vsd data transformations"
+#|   - "Heatmap top 20 genes"
+#|   - "Heatmap of distances"
+#|   - "PCA"
+#|   - "PCA without batch effect"
+#|   - "Fitting model: log10 cook´s distance"
+#|   - "Fitting model: Distance estimates"
+#| layout-ncol: 2
+
+vsd_list[["InVivo_LPS_vs_Exvivo"]]=AnalyzeCellType(CountMatrix, InfcolData, Markers)
+
+rm(Markers, AnalyzeCellType, MarkerFunction)
+
+```
+
+### Pairwise comparisons
+
+We then perform the normalization and pairwise comparison of LPS vs Exvivo and we also include gene annotation.
+
+```{r pairwisecomparisons_invivo, echo=FALSE, message=FALSE, warning=F, include=T}
+
+#### Pairwise comparisons
+
+DEResults=c(DEResults,Loop_Comparisons(InfcolData, CountMatrix, "InVivo_High"))
+
+rm(Markers, AnalyzeCellType, MarkerFunction, Loop_Comparisons, FinalResultTable, DEAnalysis, CountMatrix, COuntMatrix_2nd, InfcolData, metadataJIArnaSeq)
+
+```
+
+# Analysis of the results
+
+## 1. Sample size power:
+
+```{r tablecomparisons, echo=F, message=F, warning=F, eval=F}
+
+library(RNASeqPower)
+
+Files=list.files("BedtoolsCoverage/")
+Files=Files[sub("Aligned.sortedByCoord_mean.txt","",Files) %in% rownames(Metadata)]
+
+FinalDept=data.table()
+for(FileName in Files){
+  Depth=fread(paste0("BedtoolsCoverage/",FileName))[,c(9,10)] %>%
+    mutate(gene_id=sub('".*',"",sub('gene_id "',"",V9))) %>%
+    select(gene_id, V10)
+  Depth=Depth[Depth$gene_id %in% DEResults[["InVitro_LPS_vs_Exvivo"]][[1]]$ensembl_id,]
+  FinalDept=rbind(FinalDept, data.table(Sample=FileName, MeanDepthGenes=mean(Depth$V10),
+                  treatment=Metadata[sub("Aligned.sortedByCoord_mean.txt","",FileName),]$treatment))
+}
+
+# Inputs:
+depth <- mean(FinalDept$MeanDepthGenes)  # Average read depth per gene (not per sample). Typically, this is the number of reads mapping to a gene in a sample.
+
+n <- 8 # Number of samples per group.
+
+# Coefficient of variation (biological coefficient of variation, BCV). Usually ranges from 0.1 (technical replicates) to 0.4 (human samples).
+cv <- CVPerGroup[CVPerGroup$treatment == "Exvivo",]$MeanCV # coefficient of variation (dispersion)
+cv2 <- CVPerGroup[CVPerGroup$treatment == "LPS",]$MeanCV # coefficient of variation (dispersion)
+
+alpha <- 0.05 # Significance level (Type I error rate), usually set to 0.05.
+effect <- 2  # Effect size: fold change to detect, we used 2-fold change (log2(1)).
+
+# Calculate required sample size per group
+power <- rnapower(depth=depth, n=n, cv=cv, cv2=cv2, effect=effect, alpha=alpha)
+print(power) # Print the power (1 - Type II error)
+
+```
+
+## 2. Overview of the gene expression differences in LPS vs 0h:
+
+We considered as DEG the genes with log2FC \> ±1 and p.adjusted value \< 0.05. Table showing the the number and percentage of DEG:
+
+```{r tablecomparisons, echo=F, message=F, warning=F}
+
+## Table with differential expression numbers and %)
+
+# Limit to consider as significant (log2FC)
+log2FCLimit=1
+padjlimit=0.05
+  
+# create variables
+DiffExpResultsFiltered = data.table()
+Table=data.frame()
+AllInfo=data.table()
+NormCounts=data.table()
+for(Names in names(DEResults)){ # for loop to enter all comparisons
+  ResultTable=DEResults[[Names]][[1]] # get the result of the comparison
+
+  # change names
+  Names=sub("treatment_","",Names)
+  Names=sub("_vs_"," vs ",Names)
+  
+  AllInfo = rbind(AllInfo, data.frame(ResultTable, Comparison=Names)) # save all the data together (using as a Comparison the comparison name)
+  DEG=ResultTable[which(ResultTable$padj < padjlimit & abs(ResultTable$log2FoldChange) > log2FCLimit),] # get all significant genes as p-value lower than 0.05 and log2FC higher than 1
+  DiffExpResultsFiltered = rbind(DiffExpResultsFiltered, data.frame(DEG, Comparison=Names)) # save only DE genes as AllInfo
+  
+  Table=rbind(data.frame(Comparison=Names, 
+                         DifferentiallyExpressed=(nrow(DEG)/nrow(ResultTable)*100), # compute % of DE genes
+                         Overexpressed=(nrow(DEG[which(DEG$log2FoldChange > 0),])/nrow(ResultTable)*100), # % of overexpressed
+                         Underexpressed=(nrow(DEG[which(DEG$log2FoldChange < 0),])/nrow(ResultTable)*100),# % of underexpressed
+                         TotalDEG=nrow(DEG), # total Number of 
+                         OverexpressedNum=nrow(DEG[which(DEG$log2FoldChange > 0),]), # total number of overexpressed
+                         UnderexpressedNum=nrow(DEG[which(DEG$log2FoldChange < 0),]), # total number of underexpressed
+                         Total=nrow(ResultTable) # save total of "expressed" genes
+                         ),Table)
+  
+}
+Table
+
+fwrite(Table,"Deseq2Results/DEG_NumAndPerc.tab",quote=F,col.names = T,row.names = F,sep="\t")
+
+# Mena log2FC over vs under
+Log2FCDif=DiffExpResultsFiltered[DiffExpResultsFiltered$Comparison == "InVitro_LPS vs Exvivo", ]
+paste0("Mean log2FC of overexpressed genes: ",mean(Log2FCDif[Log2FCDif$log2FoldChange >= 1,]$log2FoldChange))
+paste0("Mean log2FC of underexpressed genes: ",mean(Log2FCDif[Log2FCDif$log2FoldChange <= -1,]$log2FoldChange))
+
+rm(Table, ResultTable, DEG, Names, Log2FCDif)
+
+```
+
+## 3. Volcano Plot
+
+```{r volcanoplot1, echo=FALSE, message=F, warning=F}
+#| label: volcanoplot1
+#| fig-cap: "Volcano Plot of protein coding genes"
+#| layout-ncol: 1
+
+n=20
+
+# General Volcano plot
+DataFrameResults=AllInfo[AllInfo$Comparison  == "InVitro_LPS vs Exvivo",] # obtain the result table
+DataFrameResults=DataFrameResults[DataFrameResults$gene_biotype == "protein_coding",]
+
+# Add an expression (over or underexpressed) in a new column
+DataFrameResults$Significant=ifelse((DataFrameResults$log2FoldChange > log2FCLimit), "Overexpressed", "Underexpressed")
+# Add the if they are non-significant
+DataFrameResults$Significant[DataFrameResults$padj > padjlimit | abs(DataFrameResults$log2FoldChange) < log2FCLimit]="Not significant"
+# Order the table by log2FC
+DataFrameResultsOrdered=DataFrameResults[order(abs(DataFrameResults$log2FoldChange),decreasing = TRUE),]
+
+# Add the names only in the path names
+DataFrameResultsOrdered$PathGeneName=""
+
+# Add the name of the pahtway genes
+DataFrameResultsOrdered=DataFrameResultsOrdered[order(DataFrameResultsOrdered$log2FoldChange, decreasing = T),]
+DataFrameResultsOrdered[1:n,"PathGeneName"]= DataFrameResultsOrdered[1:n,]$external_gene_name
+DataFrameResultsOrdered=DataFrameResultsOrdered[order(DataFrameResultsOrdered$log2FoldChange, decreasing = F),]
+DataFrameResultsOrdered[1:n/2,"PathGeneName"]= DataFrameResultsOrdered[1:n/2,]$external_gene_name
+DataFrameResultsOrdered[DataFrameResultsOrdered$padj == 0,"padj"]=1e-307
+
+# Create the volcano plot with ggplot
+VolcanoPlot<- ggplot(DataFrameResultsOrdered, aes(x =log2FoldChange, y = -1*log10(padj), color=Significant)) + geom_point(aes(x =log2FoldChange, y = -1*log10(padj), color=Significant), size = 0.5) + scale_color_manual(values = c('grey65',ColorNames[1],ColorNames[6])) +  geom_hline(yintercept=(-1*log10(padjlimit)), linetype="dashed",color = "red") + geom_vline(xintercept=c(-log2FCLimit,log2FCLimit), linetype="dashed",color = "black") + geom_text_repel(aes(x = log2FoldChange, y = -log10(padj), label = ifelse(PathGeneName != "", PathGeneName,"")), size = 3, box.padding = unit(0.6, "lines"), point.padding = unit(0.6, "lines"), max.overlaps=Inf, colour = "black") + xlab("log2 fold change") + ylab("-log10 adjusted p-value") + theme(legend.position = "top") + theme_bw() +  
+  theme(legend.position = "none", panel.border = element_rect(fill = NA),
+                                            axis.line = element_line()) +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  
+VolcanoPlot
+SavePPT(PPT, VolcanoPlot, "VolcanoPlot.pdf", 4, 2)
+
+```
+
+## 4. Enrichment analysis
+
+### a. gProfiler:
+
+```{r goenrichment, echo=F, message=F, warning=F}
+
+ResultTable=DEResults[["InVitro_LPS_vs_Exvivo"]][[1]] # obtain the result table
+OverexpressedGenes=ResultTable[which(ResultTable$padj <= padjlimit & ResultTable$log2FoldChange >= log2FCLimit),]
+
+#set_base_url("https://biit.cs.ut.ee/gprofiler_archive3/e112_eg59_p19")
+  
+# run GO and pathway enrichment analysis for 
+gostres <- gost(query=unique(OverexpressedGenes$Name), organism = "hsapiens", 
+                ordered_query = F, significant = TRUE, 
+                sources = c("KEGG", "REAC", "WP", "GO:BP"), 
+                user_threshold = 0.05, correction_method = "fdr", evcodes = T)
+
+```
+
+We select the most specific pathways gProfiler:
+
+```{r eval=T, echo=F, message=FALSE, warning=FALSE}
+#| label: gProfiler_specific
+#| fig-cap: gProfiler: most specific pathways (gProfiler)
+#| layout-ncol: 1
+
+# Get the most ancestor for each significant GO
+GO_MostSpecific_OfList <- function(GOTermsBP){ # get a GOTermsBP
+  
+  # Get all the GO::BP with the parents, unique
+  MostSpecificAncestor=unique(GOTermsBP[,c(9,11,14)])
+  MostSpecificAncestor$MostSpecificAncestors="MostSpecific" # Add a tag as the most specific
+  UniqueGO=MostSpecificAncestor$term_id # enter to all GOs
+  while(length(UniqueGO) > 0){ # while UniqueGO has possibilities
+    GOName <- UniqueGO[1] # get the first GO
+    for(GOAncestor in MostSpecificAncestor[MostSpecificAncestor$term_id == GOName,"parents"][[1]]){ # enter each ancestor in the list
+      if(length(MostSpecificAncestor[MostSpecificAncestor$term_id == GOAncestor,"MostSpecificAncestors"]) != 0){ # if it is in the list
+        MostSpecificAncestor[MostSpecificAncestor$term_id == GOAncestor,"MostSpecificAncestors"]="Ancestor" # it is the ancestor of somebody
+      } else{ # if it is not in the list
+        next # continue
+      }
+    }
+    UniqueGO=UniqueGO[UniqueGO != GOName] # remove the GO
+  }
+  return(unique(MostSpecificAncestor[MostSpecificAncestor$MostSpecificAncestors == "MostSpecific",]$term_id)) # return only the ones that are still specific
+}
+
+MostSpecific<-function(AllResults){
+  # get the most ancestor
+  MostSpecific=GO_MostSpecific_OfList(AllResults[grep("GO:BP",AllResults$source),])
+  
+  AllResults=AllResults[order(AllResults$p_value, decreasing = F),]
+  
+  GOSpecific=AllResults[AllResults$term_id %in% MostSpecific,] # get only the information of the pathways
+  
+  print("Total number of most specific pathways: ") 
+  print(nrow(GOSpecific))
+  
+  if(nrow(GOSpecific) < 50){
+    n=nrow(GOSpecific)
+  } else{
+    n=35
+  }
+  
+  Significant=ggplot(GOSpecific[1:n,], aes(y = reorder(term_name, p_value, decreasing = T), x = intersection_size/term_size, 
+                                          fill = p_value)) + 
+    geom_bar(stat = "identity") + theme_classic() + 
+    facet_grid(source~query, scales = "free", space="free") + 
+    theme(axis.text = element_text(size = rel(0.6))) + scale_size_continuous(range = c(0, 2)) + 
+    theme(axis.title.y=element_blank()) + scale_fill_viridis(discrete = F, option = "D") + 
+    xlab("Frequency of overexpressed genes\ninvolved in from the total of genes") + 
+    geom_text(aes(label=intersection_size)) + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  Significant
+  SavePPT(PPT, Significant, "gProfiler_MostSpecific.pdf", 7, 9)
+  
+  return(Significant)
+}
+
+MostSpecific(gostres[[1]])
+
+
+rm(GOPathPlot, GOPathAnalysis, Names, ResultTable, GOPlots_2, GOPlots_1, ResultsData, GOPlots, Names2)
+
+```
+
+Selected Splicing-related genes:
+
+```{r goenrichment_splicing, echo=F, message=F, warning=F}
+#| label: gProfiler_splicing
+#| fig-cap: "gProfiler: Splicing-related function enrichment from overexpressed genes"
+#| layout-ncol: 1
+
+# Splicing
+EnrichedInPathway=gostres[[1]][grep("Splicing|splicing",gostres[[1]]$term_name),]
+
+Significant=ggplot(EnrichedInPathway, aes(y = term_name, x = intersection_size/term_size, 
+                                          fill = p_value)) + 
+  geom_bar(stat = "identity") + theme_classic() + 
+  facet_grid(source~query, scales = "free", space="free") + 
+  theme(axis.text = element_text(size = rel(0.4))) + scale_size_continuous(range = c(0, 2)) + 
+  theme(axis.title.y=element_blank()) + scale_fill_viridis(discrete = F, option = "D") + 
+  xlab("Frequency of overexpressed genes\ninvolved in from the total of genes") + 
+  geom_text(aes(label=intersection_size)) + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+Significant
+SavePPT(PPT, Significant, "gProfiler.pdf", 7, 6)
+
+rm(GOPathPlot, GOPathAnalysis, Names, ResultTable, GOPlots_2, GOPlots_1, ResultsData, GOPlots, Names2)
+
+```
+
+### b. Gene set enrichment analysis (GSEA):
+
+```{r GSEA_1, echo=FALSE, message=F, warning=F}
+
+# selected
+pathways=gconvert(query = sub("REAC:","",unique(EnrichedInPathway$term_id)), 
+         organism = "hsapiens", 
+         filter_na = TRUE)
+pathways=unique(pathways[,c(2,4)])
+pathways=split(pathways$target, pathways$input)
+
+# save results
+fgseaResults=data.table()
+ranks_all=list()
+# GSEA for each result
+for(Comp in unique(AllInfo$Comparison)){
+  # prepare the ranks
+  AllInfoComp=AllInfo[AllInfo$Comparison == Comp,]
+  AllInfoComp=AllInfoComp[order(AllInfoComp$log2FoldChange, decreasing = T),]
+  ranks <- AllInfoComp$log2FoldChange
+  names(ranks) <- AllInfoComp$Name
+  # save ranks
+  ranks_all[[Comp]]=ranks
+    
+  # GSEA
+  fgseaRes=fgsea(pathways , ranks, nperm=10000)
+  fgseaRes=fgseaRes[order(fgseaRes$pval, decreasing = F),]
+  
+  # splicing
+  fgseaResSpl=fgseaRes[grep("Selected", fgseaRes$pathway),]
+  if(Comp == "InVitro_LPS vs Exvivo"){
+    print(fgseaResSpl)
+  }
+  fgseaResults=rbind(fgseaResults, data.table(fgseaResSpl, Type=Comp))
+}
+
+```
+
+```{r GSEA_figures, echo=FALSE, message=F, warning=F}
+#| label: GSEA
+#| fig-cap: "GSEA splicing-related in vitro"
+#| fig-subcap: 
+#|   - "GO:0048024: regulation of mRNA splicing, via spliceosome"
+#|   - "GO:0000380: alternative mRNA splicing, via spliceosome"
+#|   - "GO:0043484: regulation of RNA splicing"
+#|   - "GO:0000381: regulation of alternative mRNA splicing, via spliceosome"
+#|   - "GO:0033120: positive regulation of RNA splicing"
+#|   - "R-HSA-72163: mRNA Splicing - Major Pathway"
+#|   - "R-HSA-72172: mRNA Splicing"
+#| layout-ncol: 3
+
+InVitro=fgseaResults[fgseaResults$Type == "InVitro_LPS vs Exvivo",]
+AllGenes=c()
+#Significant=c()
+for(Splicing in InVitro$pathway) {
+  AllGenes=unique(c(AllGenes, pathways[[Splicing]]))
+  Significant=unique(c(Significant, strsplit(EnrichedInPathway[grep(Splicing, EnrichedInPathway$term_id),]$intersection, ",")[[1]]))
+  # specific GSEA
+  Plot=plotEnrichment(pathways[[Splicing]], ranks_all[["InVitro_LPS vs Exvivo"]]) + 
+    ggtitle(paste(sub("_Selected", "", Splicing), ", pval:", round(InVitro[InVitro$pathway == Splicing,]$padj, 6), ", ES:", round(InVitro[InVitro$pathway == Splicing,]$ES, 2),", NES:", round(InVitro[InVitro$pathway == Splicing,]$NES, 2), sep="")) + theme(panel.border = element_blank(), panel.grid.major = element_blank(), axis.text = element_text(size = rel(0.5)), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+  print(Plot)
+  SavePPT(PPT, Plot, paste0(Splicing, ".pdf"), 4, 3)
+
+}
+
+```
+
+## 5. Expression of genes involved in Splicing
+
+### a. Volcano Plot
+
+```{r volcanoplot, echo=FALSE, message=F, warning=F, eval=T}
+#| label: volcanoplot
+#| fig-cap: "Volcano Plot: genes involved in the significant pathways"
+#| layout-ncol: 1
+
+n=20
+
+## Volcano plots for specific pathway
+DataFrameResults=AllInfo[AllInfo$Comparison  == "InVitro_LPS vs Exvivo",] # obtain the result table
+DataFrameResults=DataFrameResults[DataFrameResults$Name %in% AllGenes ,] # obtain the result table
+
+# Add an expression (over or underexpressed) in a new column
+DataFrameResults$Significant=ifelse((DataFrameResults$log2FoldChange > log2FCLimit), "Overexpressed", "Underexpressed")
+# Add the if they are non-significant
+DataFrameResults$Significant[DataFrameResults$padj > padjlimit | abs(DataFrameResults$log2FoldChange) < log2FCLimit]="Not significant"
+# Order the table by log2FC
+DataFrameResultsOrdered=DataFrameResults[order(abs(DataFrameResults$log2FoldChange),decreasing = TRUE),]
+
+# Add the name of the pahtway genes
+DataFrameResultsOrdered=DataFrameResultsOrdered[order(DataFrameResultsOrdered$log2FoldChange, decreasing = T),]
+DataFrameResultsOrdered[1:n,"PathGeneName"]= DataFrameResultsOrdered[1:n,]$external_gene_name
+DataFrameResultsOrdered=DataFrameResultsOrdered[order(DataFrameResultsOrdered$log2FoldChange, decreasing = F),]
+DataFrameResultsOrdered[1:n/2,"PathGeneName"]= DataFrameResultsOrdered[1:n/2,]$external_gene_name
+
+# Create the volcano plot with ggplot
+VolcanoPlot<- ggplot(DataFrameResultsOrdered, aes(x =log2FoldChange, 
+                                                  y = -1*log10(padj), color=Significant)) + 
+  geom_point(aes(x =log2FoldChange, y = -1*log10(padj), color=Significant), size = 0.5) + 
+  scale_color_manual(values = c('grey65',ColorNames[1],ColorNames[6])) +  
+  geom_hline(yintercept=(-1*log10(padjlimit)), linetype="dashed",color = "red") + 
+  geom_vline(xintercept=c(-log2FCLimit,log2FCLimit), linetype="dashed",color = "black") + 
+  geom_text_repel(aes(x = log2FoldChange, y = -log10(padj), 
+                      label = ifelse(PathGeneName != "", PathGeneName,"")), 
+                  size = 2, box.padding = unit(0.6, "lines"), 
+                  point.padding = unit(0.6, "lines"), 
+                  max.overlaps=Inf, colour = "black") + 
+  xlab("log2 fold change") + ylab("-log10 adjusted p-value") + theme_bw() +
+  theme(legend.position = "none", panel.border = element_rect(fill = NA),
+                                            axis.line = element_line()) +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+VolcanoPlot
+SavePPT(PPT, VolcanoPlot, "VolcanoPlotSplicing.pdf", 4, 2)
+
+```
+
+### b. Heatmap
+
+```{r Heatmap, echo=FALSE, message=F, warning=F, eval=T}
+#| label: Heatmap
+#| fig-cap: "Expression of genes involved in Splicing"
+#| fig-subcap: 
+#|   - "pheatmap all (vsd)"
+#|   - "pheatmap significant (vsd)"
+#| layout-ncol: 2
+
+# save the data
+vsd=data.table()
+normalized_read_counts=data.table()
+for(Comp in names(vsd_list)[1]){ # in all comparisons
+  # Samples
+  Des=Design[[Comp]]
+  Des$SampleName=paste(Des$treatment, Des$patient_id, sep="_")
+  Des=Des[,c("sampleName","SampleName")]
+  # modify data
+  Data=data.table(assay(vsd_list[[Comp]]), GeneID=sub("\\..*","",rownames(assay(vsd_list[[Comp]]))))
+  Data=Data %>% tidyr::gather("sampleName", "VsdNorm_ReadCount", -GeneID)
+  Data=merge(Data, Des, all=T)
+  # vsd
+  vsd=rbind(vsd, data.table(Data, Comparison=Comp))
+  vsd=vsd[vsd$GeneID %in% AllGenes,]
+
+  # modify data
+  Data=data.table(DEResults[[Comp]][[2]])
+  Data=Data %>% tidyr::gather("sampleName", "Norm_ReadCount", -GeneID)
+  Data=merge(Data, Des, all=T)
+  # normalized counts
+  normalized_read_counts=rbind(normalized_read_counts, data.table(Data, Comparison=Comp))
+  normalized_read_counts$GeneID=sub("\\..*","",normalized_read_counts$GeneID)
+  normalized_read_counts=normalized_read_counts[normalized_read_counts$GeneID %in% AllGenes,]
+  rm(Data)
+}
+
+# All genes
+df <- as.data.frame(colData(vsd_list[["InVitro_LPS_vs_Exvivo"]])[,c("treatment","patient")])
+select=AllInfo[AllInfo$Comparison == "InVitro_LPS vs Exvivo",]
+select=unique(select[select$Name %in% AllGenes,]$ensembl_id)
+HeatmapCluster=pheatmap(as.data.frame(assay(vsd_list[["InVitro_LPS_vs_Exvivo"]])[select,]),
+                        cluster_rows=TRUE, 
+                        show_rownames=FALSE, 
+                        scale = "row", 
+                        cluster_cols=TRUE, 
+                        annotation_col=df)
+HeatmapCluster=as.ggplot(HeatmapCluster)
+#length(select)
+SavePPT(PPT, HeatmapCluster, "Heatmap.pdf", 6, 6)
+
+# significant
+select=AllInfo[AllInfo$Comparison == "InVitro_LPS vs Exvivo",]
+select=unique(select[select$Name %in% DataFrameResultsOrdered[DataFrameResultsOrdered$Significant != "Not significant",]$Name,]$ensembl_id)
+#length(select)
+HeatmapCluster=pheatmap(assay(vsd_list[["InVitro_LPS_vs_Exvivo"]])[select,], 
+                                 scale = "row",
+                                 cluster_rows=TRUE,
+                                 show_rownames=FALSE, 
+                                 cluster_cols=TRUE, annotation_col=df)
+HeatmapCluster=as.ggplot(HeatmapCluster)
+
+SavePPT(PPT, HeatmapCluster, "HeatmapSignificant.pdf", 6, 6)
+
+```
+
+```{r GOClusters, echo=FALSE, message=F, warning=F, eval=T}
+#| label: Gocluster
+#| fig-cap: "GOs of each cluster"
+#| layout-ncol: 2
+
+Subset=AllInfo[AllInfo$Comparison == "InVitro_LPS vs Exvivo",][AllInfo[AllInfo$Comparison == "InVitro_LPS vs Exvivo",]$ensembl_id %in% select,]
+
+SplicingClusters=list(Overexpressed=Subset[which(Subset$padj <= padjlimit & 
+                          Subset$log2FoldChange >= log2FCLimit),]$external_gene_name,
+                      Underexpressed=Subset[which(Subset$padj <= padjlimit & 
+                          Subset$log2FoldChange <= -log2FCLimit),]$external_gene_name)
+
+# run GO and pathway enrichment analysis for 
+go_clusters_splicing <- gost(query=SplicingClusters, organism = "hsapiens", 
+                ordered_query = F, significant = TRUE, 
+                sources = c("KEGG", "REAC", "WP", "GO:BP"), 
+                user_threshold = 0.05, correction_method = "fdr", evcodes = T)[[1]]
+
+GOCluster=split(go_clusters_splicing$term_name, 
+                 go_clusters_splicing$query)
+
+GeneOntologies=data.table(Functions=intersect(GOCluster[[1]],GOCluster[[2]]), Type="Shared")
+GeneOntologies=rbind(GeneOntologies,
+                     data.table(Functions=setdiff(GOCluster[[1]],GOCluster[[2]]), 
+                                Type="Overexpressed"))
+GeneOntologies=rbind(GeneOntologies,
+                     data.table(Functions=setdiff(GOCluster[[2]],GOCluster[[1]]), 
+                                Type="Underexpressed"))
+
+```
+
+## 6. Validation of splicing in vivo: Enriched DE genes expression in vivo:
+
+```{r normaldistirbution1, echo=F, message=F, warning=F}
+#| label: normaldistirbution1
+#| fig-cap: "Histogram of normalized read counts (normal distirbution (?))"
+#| layout-ncol: 1
+
+## Select the Enriched pathways
+SelectedGenes=data.table()
+for(TermIDSig in unique(EnrichedInPathway$term_id)){
+  SelectedGenes=rbind(SelectedGenes,
+                      data.table(Pathway=EnrichedInPathway[EnrichedInPathway$term_id == TermIDSig, ]$term_name,
+                                 Gene=strsplit(EnrichedInPathway[EnrichedInPathway$term_id == TermIDSig, ]$intersection, ",")[[1]]))
+}
+
+# Get DE genes invovled in splicing
+DEGenesInInvitro=DEResults[["InVitro_LPS_vs_Exvivo"]][[1]]
+DEGenesInInvitro=DEGenesInInvitro[DEGenesInInvitro$Name %in% SelectedGenes$Gene,]
+# all significant
+DEGenesInInvitro=DEGenesInInvitro[DEGenesInInvitro$padj <= 0.05 & DEGenesInInvitro$log2FoldChange >=1,]
+SelectedGenes=SelectedGenes[SelectedGenes$Gene %in% DEGenesInInvitro$Name, ]
+unique(SelectedGenes[SelectedGenes$Pathway == "mRNA Splicing",]$Gene==SelectedGenes[SelectedGenes$Pathway == "mRNA Splicing - Major Pathway",]$Gene)
+
+# extract normalzied read counts
+normalized_read_counts_all=data.table()
+# Samples
+Des=Design[["InVivo_LPS_vs_Exvivo"]]
+  
+# prepare the percentatges of funcitonal isoforms
+normalized_read_counts_all=data.table(DEResults[["InVivo_High_LPS_vs_Exvivo"]][[2]] %>% 
+    mutate(LPS=rowMeans(select(., Des[grep("LPS",Des$treatment),]$sampleName))) %>%
+    mutate(Exvivo=rowMeans(select(., Des[grep("Exvivo",Des$treatment),]$sampleName))) %>%
+    mutate(Gene=sub("\\..*","",GeneID)) %>%
+    select(c("Gene","LPS","Exvivo")) %>% pivot_longer(cols = c(LPS, Exvivo), names_to = c("Treatment"), values_to = "MeanNormalizedReadCount"))
+
+normalized_read_counts=normalized_read_counts_all[normalized_read_counts_all$Gene %in% unique(SelectedGenes$Gene),]
+normalized_read_counts=merge(normalized_read_counts, SelectedGenes, all=T, by="Gene",allow.cartesian=TRUE)
+normalized_read_counts[normalized_read_counts$Treatment == "Exvivo","Treatment"]="Baseline"
+normalized_read_counts[normalized_read_counts$Treatment == "LPS","Treatment"]="Inpatient\nendotoxin\nchallenge"
+
+# Does it follows a normal distribution?
+print("Shapiro test (does it follows a normal distribution?)")
+shapiro.test(normalized_read_counts$MeanNormalizedReadCount)
+hist(normalized_read_counts$MeanNormalizedReadCount, 
+     breaks = 20, 
+     main = "In vivo", 
+     xlab = "Normalized read counts", 
+     col = "lightblue", 
+     border = "black")
+
+```
+
+```{r barplot1, echo=F, message=F, warning=F}
+#| label: barplot1
+#| fig-cap: "DE genes in vitro involved in the Splicing reactome pathway"
+#| fig-subcap: 
+#|   - "In vitro and in vivo - MeanReadCount"
+#| layout-ncol: 2
+
+normalized_read_counts=normalized_read_counts[order(normalized_read_counts$Treatment),]
+
+library(ggpubr)
+normalized_read_counts$log10MeanNormalizedReadCount=log10(normalized_read_counts$MeanNormalizedReadCount)
+Plot=ggpaired(normalized_read_counts[normalized_read_counts$Pathway != 
+                                       "mRNA Splicing - Major Pathway",], 
+              x = "Treatment", y = "MeanNormalizedReadCount", id = "Gene", 
+              color = "Treatment", facet.by = "Pathway", line.color = "gray", 
+              line.size = 0.3, short.panel.labs = FALSE,
+              point.size = 1) + 
+  scale_color_manual(values = c("Baseline" = "#6F99ADFF", 
+                                "Inpatient\nendotoxin\nchallenge" = "#BC3C29FF")) + 
+  stat_compare_means(paired = TRUE, method = "wilcox.test", label = "p.format") + 
+  theme(legend.position = "none", axis.text = element_text(size = rel(0.5)))
+Plot
+
+p.adjust(c(0.002, 0.00045, 0.013, 0.00084, 3.6e-05, 1.3e-06), method = "fdr")
+
+SavePPT(PPT, Plot, "InVivoValidation.pdf", 4, 4)
+
+rm(CorrelationPlot, Correlation)
+
+```
+
+```{r Venndiagram, echo=F, message=F, warning=F}
+#| label: vendiagram
+#| fig-cap: "Overlap between differentially expressed splicing-related genes"
+#| fig-subcap: 
+#|   - "Venn Diagram"
+#| layout-ncol: 2
+
+# Select the In vivo overexpressed genes involved in spicing
+InVivo=DEResults[["InVivo_High_LPS_vs_Exvivo"]][[1]][DEResults[["InVivo_High_LPS_vs_Exvivo"]][[1]]$external_gene_name %in% DEGenesInInvitro$external_gene_name,]
+
+SummaryPerCategory <- InVivo %>%
+  mutate(Category = case_when(
+    log2FoldChange >= 1 & padj <= 0.05 ~ "log2FC > 1 and p < 0.05",
+    log2FoldChange >= 0.5 & padj <= 0.05 ~ "log2FC > 0.5 and p < 0.05",
+    log2FoldChange <= 0 & padj <= 0.05 ~ "log2FC < 0 and p < 0.05",
+    padj <= 0.05 ~ "p < 0.05 only",
+    TRUE ~ "Not Significant"
+  )) %>%
+  dplyr::count(Category)
+SummaryPerCategory$Category=factor(SummaryPerCategory$Category,
+                  levels = c("log2FC > 1 and p < 0.05","log2FC > 0.5 and p < 0.05",
+                             "p < 0.05 only", "log2FC < 0 and p < 0.05", 
+                             "Not Significant"))
+
+# Pie Plot
+PiePlot <- ggplot(SummaryPerCategory, aes(x = "", y = n, fill = Category)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  geom_text(aes(label = paste0(n, " (", round(n / sum(n) * 100), "%)")),
+            position = position_stack(vjust = 0.5)) + 
+  scale_fill_manual(values = c(ColorNames[3], ColorNames[7],
+                               ColorNames[5], ColorNames[6],
+                               "grey70"))
+PiePlot
+SavePPT(PPT, PiePlot, "PieIsoformInVivoValidation.pdf", 4, 3)
+
+
+```
+
+## 7. In vitro experiments: Splicing inhibition:
+
+```{r final, echo=FALSE, include=F, eval=T}
+
+InhibitPlot=read_excel("../IsoformDetection/Analysis/InhibitFile_Final.xlsx")
+InhibitPlot$Sample <- iconv(InhibitPlot$Sample, from = "UTF-8", to = "ASCII//TRANSLIT")
+InhibitPlot$Inhibitor="CLK/SRPIN340"
+InhibitPlot[grep("pp2a|PP2a", InhibitPlot$Type), "Inhibitor"]="PP2a"
+InhibitPlot$Type_of="FACS"
+InhibitPlot[grep("MFI", InhibitPlot$Type), "Type_of"]="MFI"
+InhibitPlot[grep("QPCR", InhibitPlot$Type), "Type_of"]="qPCR"
+InhibitPlot=InhibitPlot %>%
+  pivot_longer(cols = starts_with("Rep"),
+               values_to = "Values",
+               names_to = "Replicates") %>%
+  filter(!is.na(Values)) %>%
+  mutate(Sample=factor(Sample, levels = c("stim", "10uM CLK-IN-T3", "100uM SRPIN340", "stim + 10uM LB-100")))
+
+Val_lab=list(
+  "FACS" = "% TNFa",
+  "MFI" = "MFI",
+  "qPCR" = "Fold change TNFa")
+
+Plots=list()
+for(Inhibitor in unique(InhibitPlot$Inhibitor)){
+  if(Inhibitor == "CLK/SRPIN340"){
+    Comparison = list(c("stim", "10uM CLK-IN-T3"), c("stim", "100uM SRPIN340"))
+  } else {
+    Comparison = list(c("stim", "stim + 10uM LB-100"))
+  }
+  for(Type in unique(InhibitPlot$Type_of)){
+      InhibitPlot_Subset=InhibitPlot[InhibitPlot$Inhibitor == Inhibitor &
+                                       InhibitPlot$Type_of == Type,]
+      Plots[[paste(Inhibitor, Type, sep = "_")]]=ggplot(InhibitPlot_Subset, aes(x = Sample, y = Values, color = Sample, fill = Sample)) +
+        geom_bar(stat = "summary", fun = "mean", position = position_dodge(0.8), 
+             width = 0.7, color = "black") + 
+        geom_errorbar(stat = "summary", fun.data = "mean_se", position = position_dodge(0.8), 
+                  width = 0.25, color="black") +
+        geom_point(size = 1.5, color = "black") +
+        scale_fill_manual(values = c("stim" = "#BC3C29FF",
+                                 "10uM CLK-IN-T3"= "#E18727FF",
+                                 "100uM SRPIN340"= "#7876B1FF",
+                                 "stim + 10uM LB-100"= "#20854EFF")) +
+        labs(x = "Condition", y = Val_lab[[Type]]) +
+        stat_compare_means(method = "t.test", paired = T,
+                           ref.group = "stim", label = "p.format") + theme_bw() +
+        theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), 
+              axis.line = element_line(colour = "black"), 
+              legend.position = "none", 
+              axis.text.x = element_text(angle = 45, hjust = 1))
+      SavePPT(PPT, Plots[[paste(Inhibitor, Type, sep = "_")]], 
+              paste0(paste(sub("/","_",Inhibitor), Type, sep = "_"),".pdf"), 2, 4)
+  }
+}
+
+Plots
+
+InhibitPlot=read_excel("Inhibitors.xlsx")
+InhibitPlot$Sample <- iconv(InhibitPlot$Sample, from = "UTF-8", to = "ASCII//TRANSLIT")
+InhibitPlotPivotLonger =InhibitPlot %>% 
+  pivot_longer(cols = c(2:4), names_to = "donnor", values_to = "values")
+InhibitPlot$Type_of="FACS"
+InhibitPlot[grep("MFI", InhibitPlot$Type), "Type_of"]="MFI"
+
+Val_lab=list(
+  "FACS" = "% TNFa", "MFI" = "MFI")
+
+Plots=list()
+for(Inhibitor in unique(InhibitPlot$Inhibitor)){
+  for(Type in unique(InhibitPlot$Type_of)){
+    InhibitPlot_Subset=InhibitPlot[InhibitPlot$Inhibitor == Inhibitor &
+                                     InhibitPlot$Type_of == Type,]
+    
+    
+    Plots[[paste(Inhibitor, Type, sep = "_")]]=ggplot(InhibitPlot_Subset, aes(x = Sample, y = Values, color = Sample, fill = Sample)) +
+        geom_bar(stat = "summary", fun = "mean", position = position_dodge(0.8), 
+             width = 0.7, color = "black") + 
+        geom_errorbar(stat = "summary", fun.data = "mean_se", position = position_dodge(0.8), 
+                  width = 0.25, color="black") +
+        geom_point(size = 1.5, color = "black") +
+        scale_fill_manual(values = c("stim" = "#BC3C29FF",
+                                 "10uM CLK-IN-T3"= "#E18727FF",
+                                 "100uM SRPIN340"= "#7876B1FF",
+                                 "stim + 10uM LB-100"= "#20854EFF")) +
+        labs(x = "Condition", y = Val_lab[[Type]]) +
+        stat_compare_means(method = "t.test", paired = T,
+                           ref.group = "stim", label = "p.format") + theme_bw() +
+        theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), 
+              axis.line = element_line(colour = "black"), 
+              legend.position = "none", 
+              axis.text.x = element_text(angle = 45, hjust = 1))
+      SavePPT(PPT, Plots[[paste(Inhibitor, Type, sep = "_")]], 
+              paste0(paste(sub("/","_",Inhibitor), Type, sep = "_"),".pdf"), 2, 4)
+  }
+}
+
+Plots
+
+```
+
+```{r final, echo=FALSE, include=F, eval=F}
+
+print("Run all")
+print(PPT, target = "Fig1/Figure1.pptx")
+
+```

@@ -1,0 +1,2019 @@
+---
+title: "Fig. 4: Functional changes after activation"
+author: "Alejandra Bodelon"
+format:
+  html:
+    extra_dependencies: ["float"]
+    fig-pos: H
+    toc: true
+    toc-location: left
+    embed-resources: true
+editor: visual
+---
+
+# Paper figures:
+
+```{r, echo=FALSE, include=F}
+library(ggpubr)
+library(RColorBrewer)
+library(data.table)
+library(ggplot2)
+library(dbplyr)
+library(tidyverse)
+library(tidyr)
+library(ggsci)
+library(ggvenn)
+library(gridExtra)
+library(GenomicRanges)
+library(officer)
+library(rvg)
+library(ggrepel)
+
+SavePPT <-function(PPT,Plot,Name, width_1, height_1){
+  ggsave(paste0("Fig4/",Name),bg="white", width = width_1, height = height_1)
+  fig_vg <- dml(ggobj = Plot)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location(width = width_1, 
+                                                             height = height_1))
+  return(PPT)
+}
+ 
+PPT <- read_pptx()
+
+ColorNames=pal_nejm("default")(8)
+
+```
+
+# Figure 4. Consequences of the isoform switching
+
+```{r, echo=FALSE, message=F, warning=F, include=F}
+
+Percentatge=data.table()
+AnnotationPerc=data.table()
+
+# Minimum of expression for each "type"
+MinimReads=3
+  
+### Read expression
+Monocyte_Isoforms_quantified=fread("FinalIsoformAnnotation/Monocyte_Isoforms_quantified.counts.tsv", header=T)
+Monocyte_Isoforms_quantified$isoform_id=sub("_.*","",Monocyte_Isoforms_quantified$ids) # get the ids without the gene names
+Monocyte_Isoforms_quantified$gene_id=sub(".*_","",Monocyte_Isoforms_quantified$ids)
+
+# filter by expression of at least 3 in all samples (as flair)
+if(exists("MinimReads")){
+  Monocyte_Isoforms_quantified=Monocyte_Isoforms_quantified %>%
+    mutate(Sum_Reads=rowSums(select(., contains("batch")))) %>%
+    subset(Sum_Reads > MinimReads) %>% select(-c("Sum_Reads"))
+}
+
+PercFunct<-function(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, Analysis, MinimReads, ColorNames){
+  
+  # filter the isoforms that at least have two different functionalities, including the one we are interested
+  Filter=data.table(table(unique(Monocyte_Isoforms_quantified_Functionality[,c(9,10)])$gene_id))
+  Monocyte_Isoforms_quantified_Functionality=
+    Monocyte_Isoforms_quantified_Functionality[Monocyte_Isoforms_quantified_Functionality$gene_id %in%
+                                                 Filter[Filter$N > 1]$V1, ]
+  Monocyte_Isoforms_quantified_Functionality=
+    Monocyte_Isoforms_quantified_Functionality[Monocyte_Isoforms_quantified_Functionality$gene_id %in%
+               unique(Monocyte_Isoforms_quantified_Functionality[Monocyte_Isoforms_quantified_Functionality$functionality == 
+                                                                              Analysis,]$gene_id), ]
+  # prepare the percentatges of funcitonal isoforms
+  PercentgeTable=Monocyte_Isoforms_quantified_Functionality %>% 
+    group_by(gene_id, functionality) %>%
+    summarise(across(c(-isoform_id,-ids), sum), .groups = "drop") %>%
+    group_by(gene_id) %>%
+    mutate(across(colnames(Monocyte_Isoforms_quantified)[-c(1,8,9)], proportions, .names="{.col}_perc")) %>%
+    ungroup(.) %>%
+    mutate(across(everything(), ~replace_na(. , 0))) %>%
+    ungroup(.) %>%
+    mutate(LPS=rowMeans(select(., intersect(contains("LPS"), contains("_perc"))))) %>%
+    mutate(Exvivo=rowMeans(select(., intersect(contains("exVivo"), contains("_perc"))))) %>%
+    group_by(gene_id) %>% filter(functionality==Analysis)
+  
+  # subtract the final data
+  Finaldata=data.table(Gene=PercentgeTable$gene_id,
+                       LPS_Functional=PercentgeTable$LPS,
+                       Exvivo_Functional=PercentgeTable$Exvivo)
+  
+  # Get the number of LPS>XV and XV>LPS
+  PercentgeTable$Percentatge=PercentgeTable$LPS-PercentgeTable$Exvivo
+  print(paste(Analysis, "=>",nrow(PercentgeTable),"selected from",length(unique(Monocyte_Isoforms_quantified$gene_id)), "genes with isoforms with at least", MinimReads, "reads in all samples and more than one functional type"))
+  print(paste("No changes: ",nrow(PercentgeTable[PercentgeTable$Percentatge == 0,])/nrow(PercentgeTable)*100))
+  print(paste("More in LPS: ",nrow(PercentgeTable[PercentgeTable$Percentatge > 0,])/nrow(PercentgeTable)*100))
+  print(paste("More in Exvivo: ",nrow(PercentgeTable[PercentgeTable$Percentatge < 0,])/nrow(PercentgeTable)*100))
+  
+  print(paste("Wilcoxon test (percentatge of",Analysis,"isoforms in LPS vs exvivo): ", wilcox.test(PercentgeTable$LPS,PercentgeTable$Exvivo, paired = TRUE)$p.value))
+  
+  # Percentatge
+  Percentatges=data.table(Name=rep(Analysis, 3),
+                          Type=c("No changes", "More in LPS", "More in Exvivo"),
+              Percentatge=c(nrow(PercentgeTable[PercentgeTable$Percentatge == 0,])/nrow(PercentgeTable)*100, nrow(PercentgeTable[PercentgeTable$Percentatge > 0,])/nrow(PercentgeTable)*100, nrow(PercentgeTable[PercentgeTable$Percentatge < 0,])/nrow(PercentgeTable)*100),
+              WilcoxTest=rep(wilcox.test(PercentgeTable$LPS,PercentgeTable$Exvivo)$p.value,3))
+  
+  # compute different colors depending on the differences in exvivo vs LPS
+  Finaldata$Type="Similar" # all similar
+  # more than double
+  Finaldata[abs(Finaldata$LPS_Functional-Finaldata$Exvivo_Functional) >= 0.25,"Type"]="25% more"
+  # more than double
+  Finaldata[abs(Finaldata$LPS_Functional-Finaldata$Exvivo_Functional) >= 0.5,"Type"]="50% more"
+
+  AllData=list(Finaldata, Percentatges)
+  
+  return(AllData)
+}
+
+IsoformFunction<-function(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, Analysis, MinimReads, ColorNames){
+  
+  ListAll=PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, Analysis, MinimReads, ColorNames)
+  
+  Percentatges=data.frame(ListAll[[2]])
+  Finaldata=ListAll[[1]]
+  
+  # Scatter plot
+  SactterPlot=ggplot(Finaldata, aes(x=Exvivo_Functional, y=LPS_Functional, color=Type)) + 
+    geom_point(size=0.5) +
+    theme(axis.text = element_text(size = rel(1), face="bold"), 
+          strip.text = element_text(size = rel(0.75),face = "bold"), 
+          legend.position = "none",
+          legend.title = element_text(size = rel(1),face = "bold"), 
+          legend.text = element_text(size = rel(0.75),face = "bold"), 
+          axis.title = element_text(size = rel(1),face = "bold"),
+          axis.text.x=element_text(hjust=1)) + 
+    geom_abline(intercept = 0, slope = 1, colour="black", linetype="dashed", size=1) +
+    ylab(paste("Fraction of ", Analysis," isoforms in LPS")) + 
+    xlab(paste("Fraction of ", Analysis," isoforms in Exvivo")) +
+    scale_color_manual(values=c(ColorNames[2],ColorNames[1],"grey65")) +
+    theme_bw() +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          legend.position = "none")
+    scale_color_manual(values=c("grey65",ColorNames[2],ColorNames[1]))
+
+  fig_vg <- dml(ggobj = SactterPlot)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location_fullsize())
+  
+  # Marginal density plot of x (top panel)
+  xdensity <- ggplot(Finaldata, aes(Exvivo_Functional, fill="")) + geom_density(alpha=.5) + 
+    scale_fill_manual(values = c(ColorNames[5])) + theme(legend.position = "none") + ylab("Density") +
+    theme_minimal() +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          legend.position = "none",
+          axis.text.x = element_blank()) +
+    theme(strip.text = element_text(size = rel(0.75)), 
+          axis.title.x = element_blank(),
+          axis.title.y = element_text(size = rel(1)),
+          axis.text.x=element_blank(),
+          panel.background = element_blank())
+
+  fig_vg <- dml(ggobj = xdensity)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location_fullsize())
+  
+  # Marginal density plot of y (right panel)
+  ydensity <- ggplot(Finaldata, aes(y=LPS_Functional, fill="")) + geom_density(alpha=.5) + 
+    scale_fill_manual(values = c(ColorNames[4])) + theme(legend.position = "none") +
+    xlab("Density") +
+    theme_minimal() +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          legend.position = "none") +
+    theme(axis.text = element_text(size = rel(1)), 
+          strip.text = element_text(size = rel(0.75)), 
+          axis.title.y = element_blank(),
+          axis.title.x = element_text(size = rel(1)),
+          axis.text.x = element_text(hjust=1),
+          panel.background = element_blank(),
+          axis.text.y=element_blank())
+  
+  fig_vg <- dml(ggobj = ydensity)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location_fullsize())
+  
+  blankPlot <- ggplot()+geom_blank(aes(1,1))+
+    theme(plot.background = element_blank(), 
+     panel.grid.major = element_blank(),
+     panel.grid.minor = element_blank(), 
+     panel.border = element_blank(),
+     panel.background = element_blank(),
+     axis.title.x = element_blank(),
+     axis.title.y = element_blank(),
+     axis.text.x = element_blank(), 
+     axis.text.y = element_blank(),
+     axis.ticks = element_blank()
+       )
+  MulpltyPlot=grid.arrange(xdensity, blankPlot, SactterPlot, ydensity, 
+          ncol=2, nrow=2, widths=c(4, 1.4), heights=c(1.4, 4))
+  MulpltyPlot
+  ggsave(plot=MulpltyPlot, 
+         paste0("Fig4/",paste0(Analysis,".pdf")),bg="white", width = 10, height = 5)
+
+  # Per donnor analysis
+  #DonnorPlot=EffectPerDonnor(Monocyte_Isoforms_quantified, PercentgeTable, Analysis, ColorNames)
+  
+  #return(list(DonnorPlot, Percentatges))
+  return(list(MulpltyPlot, Percentatges, Finaldata))
+}
+
+EffectPerDonnor<-function(Monocyte_Isoforms_quantified, PercentgeTable, Analysis, ColorNames){
+  DonnorPlot=list()
+  for(Batch in unique(sub(".*_","",colnames(Monocyte_Isoforms_quantified)[-c(1,8,9)]))){
+    # get the column of the percentatge of the selected batch
+    GetCol=colnames(PercentgeTable)[grep(Batch, colnames(PercentgeTable))][grep("_perc", colnames(PercentgeTable)[grep(Batch, colnames(PercentgeTable))])]
+    # Extract the data of the selected donor (LPS and exvivo)
+    Finaldata=data.table(Gene=PercentgeTable$gene_id,
+                       LPS_Functional=PercentgeTable[,GetCol[grep("LPS",GetCol)]],
+                       Exvivo_Functional=PercentgeTable[,GetCol[grep("exVivo",GetCol)]],
+                       Percentatge=PercentgeTable[,GetCol[grep("LPS",GetCol)]]-PercentgeTable[,GetCol[grep("exVivo",GetCol)]])
+    
+    # compute different colors depending on the differences in exvivo vs LPS
+    Finaldata$Type="|log2FC| < 1" # all similar
+    # more than double
+    Finaldata[abs(log2(Finaldata$LPS_Functional/Finaldata$Exvivo_Functional)) > 0.25,"Type"]="|log2FC| > 0.25"
+    # more than double
+    Finaldata[abs(log2(Finaldata$LPS_Functional/Finaldata$Exvivo_Functional)) > 1,"Type"]="|log2FC| > 1"
+  
+    # Scatter plot
+    DonnorPlot[[Batch]]=ggplot(Finaldata, aes(x=Exvivo_Functional, y=LPS_Functional, color=Type)) + 
+      geom_point(size=0.5) +
+      theme(axis.text = element_text(size = rel(1), face="bold"), 
+            strip.text = element_text(size = rel(0.75),face = "bold"), 
+            legend.position = "bottom",
+            legend.title = element_text(size = rel(1),face = "bold"), 
+            legend.text = element_text(size = rel(0.75),face = "bold"), 
+            axis.title = element_text(size = rel(1),face = "bold"),
+            axis.text.x=element_text(hjust=1)) + 
+      geom_abline(intercept = 0, slope = 1, colour=ColorNames[1], linetype="dashed", size=1.5) +
+      ylab(paste("Fraction of ", Analysis," isoforms in LPS")) + 
+      xlab(paste("Fraction of ", Analysis," isoforms in Exvivo")) +
+      scale_color_manual(values=c("grey65",ColorNames[2],ColorNames[1]))
+    
+    fig_vg <- dml(ggobj = DonnorPlot[[Batch]])
+    PPT <- add_slide(PPT)
+    PPT <- ph_with(PPT, value = fig_vg, location = ph_location_fullsize())
+  }
+  return(DonnorPlot)
+}
+
+```
+
+## 1. Increase of longest-ORF, productivity, less intron retention more exon skipping.
+
+### a. Longest ORF analysis
+
+We considered the longest predicted ORF (with start and stop codon =\> GeneMark was used for ORF prediction) for each gene. ORF in the same gene of the same length are both considered as functional.
+
+```{r, echo=FALSE, message=F, warning=F}
+# functionality prediction
+FunctMaxORF=fread("FinalIsoformAnnotation/Monocyte_Isoforms.functMaxORF.txt", header=F)
+FunctMaxORF$V1=sub(";","",FunctMaxORF$V1)
+colnames(FunctMaxORF)=c("gene_id","isoform_id","functionality")
+
+# merge with the quantification data
+Monocyte_Isoforms_quantified_Functionality=merge(Monocyte_Isoforms_quantified[,c(1:8)], FunctMaxORF)
+
+print("Possibilities:")
+print(unique(Monocyte_Isoforms_quantified_Functionality$functionality))
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3A1
+#| fig-cap: "Functionality differences in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors"
+#| layout-ncol: 1
+
+# Run the analysis
+DonnorPlot=IsoformFunction(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "functional", MinimReads, ColorNames)
+
+Percentatge=rbind(Percentatge,
+                  data.table(DonnorPlot[[2]],
+                             Event="Functionality"))
+
+AnnotationPerc=rbind(AnnotationPerc,
+                 data.table(DonnorPlot[[3]], Event="Functionality"))
+
+# Functional
+Functionality <- data.table(PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "functional", MinimReads, ColorNames)[[1]], Event="Functionality")
+
+```
+
+### b. Productivity analysis
+
+We used the predictProductivity flair script. Isoforms are then categorize as PRO (productive), PTC (premature termination codon - unproductive), NGO (no start codon - unproductive) or NST (has start codon but not stop codon - unproductive).
+
+```{r, echo=FALSE, message=F, warning=F}
+
+# productivity prediction
+Productivity=fread("FinalIsoformAnnotation/Monocyte_Isoforms_productivity.bed", header=F)
+Productivity=Productivity[,c(4,13)]
+Productivity$V4=sub("_.*","",Productivity$V4)
+colnames(Productivity)=c("isoform_id","functionality")
+
+print("Possibilities:")
+print(unique(Productivity$functionality))
+
+Productivity[Productivity$functionality == "PRO","functionality"]="productive"
+
+# merge with the data
+Monocyte_Isoforms_quantified_Functionality=merge(Monocyte_Isoforms_quantified, Productivity)
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3B1
+#| fig-cap: "Productivity difference in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors"
+#| layout-ncol: 1
+
+# Run the analysis
+DonnorPlot=IsoformFunction(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "productive", MinimReads, ColorNames)
+
+Percentatge=rbind(Percentatge,
+                  data.table(DonnorPlot[[2]],
+                             Event="Functionality"))
+
+AnnotationPerc=rbind(AnnotationPerc,
+                 data.table(DonnorPlot[[3]], Event="Productivity"))
+# Functional
+Functionality <- rbind(Functionality,
+                       data.table(PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "productive", MinimReads, ColorNames)[[1]], Event="Productivity"))
+
+```
+
+### c. Novel vs known isoforms
+
+We considered all isoforms with Ensembl id as known isoforms as the rest as novel isoforms.
+
+```{r, echo=FALSE, message=F, warning=F, eval=T}
+
+# novel vs annotated splice sites 
+Annotation=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt", header=T)
+Annotation=Annotation[,c(1,8)]
+colnames(Annotation)=c("isoform_id","functionality")
+Annotation[grep("ENST",Annotation$functionality),"functionality"]="annotated"
+
+# merge with the data
+Monocyte_Isoforms_quantified_Functionality=merge(Monocyte_Isoforms_quantified, Annotation)
+
+print("Possibilities:")
+print(unique(Monocyte_Isoforms_quantified_Functionality$functionality))
+
+```
+
+```{r, echo=FALSE, message=F, warning=F, eval=T}
+#| label: fig-3C1
+#| fig-cap: "Novel isoform usage difference in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors"
+#| layout-ncol: 1
+
+# Run the analysis
+DonnorPlot=IsoformFunction(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "novel", MinimReads, ColorNames)
+
+Percentatge=rbind(Percentatge,
+                  data.table(DonnorPlot[[2]],
+                             Event="Isoform Usage"))
+
+AnnotationPerc=rbind(AnnotationPerc,
+                 data.table(DonnorPlot[[3]], Event="Novelty"))
+
+# Functional
+Functionality <- rbind(Functionality,
+                       data.table(PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "novel", MinimReads, ColorNames)[[1]], Event="Novelty"))
+
+```
+
+### d. Ensembl Canonical transcripts
+
+The Ensembl Canonical transcript is a single, representative transcript identified at every locus. The single Ensembl Canonical transcript per locus provide consistency when only one transcript is required. For protein-coding genes, it identifies the transcript that, on balance, has the highest coverage of conserved exons, highest expression, longest coding sequence and is represented in other key resources, such as NCBI and UniProt. To identify this transcript, Ensmbl considered, where available, evidence of functional potential (such as evolutionary conservation of a coding region, transcript expression levels), transcript length and evidence from other resources (such as concordance with the APPRIS1 ’principal isoform’ and with the UniProt/Swiss-Prot ‘canonical isoform’).
+
+```{r, echo=FALSE, message=F, warning=F}
+
+# canonical splice sites 
+EnsmblCanonical=fread("ReferenceGenome/gencode.v46.primary_assembly.annotation.gtf", header=F)
+EnsmblCanonical=EnsmblCanonical[EnsmblCanonical$V3 == "transcript",]
+EnsmblCanonical$EnsmblId=sub('.*transcript_id "',"",EnsmblCanonical$V9)
+EnsmblCanonical$EnsmblId=sub('".*',"",EnsmblCanonical$EnsmblId)
+EnsmblCanonical$functionality="others"
+EnsmblCanonical[grep("Ensembl_canonical",EnsmblCanonical$V9),"functionality"]="Ensembl_canonical"
+
+EnsmblCanonical=EnsmblCanonical[,c(10,11)]
+colnames(EnsmblCanonical)=c("isoform_id","functionality")
+
+# merge with the data
+Monocyte_Isoforms_quantified_Functionality=merge(Monocyte_Isoforms_quantified, EnsmblCanonical, all.x=T)
+Monocyte_Isoforms_quantified_Functionality[is.na(Monocyte_Isoforms_quantified_Functionality$functionality),"functionality"]="others"
+
+print("Possibilities:")
+unique(Monocyte_Isoforms_quantified_Functionality$functionality)
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3G1
+#| fig-cap: "Canonical isoform usage difference in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors"
+#| layout-ncol: 1
+
+# Run the analysis
+DonnorPlot=IsoformFunction(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "Ensembl_canonical", MinimReads, ColorNames)
+
+Percentatge=rbind(Percentatge,
+                  data.table(DonnorPlot[[2]],
+                             Event="Isoform Usage"))
+
+AnnotationPerc=rbind(AnnotationPerc,
+                 data.table(DonnorPlot[[3]], Event="Ensembl_canonical"))
+
+# Functional
+Functionality <- rbind(Functionality,
+                       data.table(PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "Ensembl_canonical", MinimReads, ColorNames)[[1]], Event="Ensembl_canonical"))
+
+```
+
+### e. Increase in isoforms with protein domains
+
+We used Pfam domains in each isoform.
+
+```{r, echo=FALSE, message=F, warning=F, eval=T}
+
+# Pfam annotations
+PfamA_output=fread("FinalIsoformAnnotation/pfam_all.result", skip=28, header=F, fill=T)
+colnames(PfamA_output)=c("isoform", "start", "end", "envelope_start", "envelope_end", "hmm_acc", "hmm_name", "type", "hmm_start", "hmm_end", "hmm_length", "bit_score", "E-value", "significance", "clan")
+
+# Significant threshoolds
+MinEVal = 0.001
+PfamA_output=PfamA_output[PfamA_output$`E-value` < MinEVal,]
+PfamA_output=PfamA_output[PfamA_output$bit_score > 20,]
+
+# Isoform with more domains
+Annot=Monocyte_Isoforms_quantified[,1]
+Annot$gene_id=sub(".*_", "", Annot$ids)
+Annot$isoforms=sub("_.*", "", Annot$ids)
+NumberOfDomains=data.table(table(PfamA_output$isoform))
+colnames(NumberOfDomains)=c("isoforms", "num_domains")
+
+# Merge
+NumberOfDomains=merge(Annot, NumberOfDomains)
+NumberOfDomains=NumberOfDomains %>% group_by(gene_id) %>%
+  mutate(functionality = if_else(num_domains == max(num_domains), "More_domains", "Less_domains")) %>%
+  rename(isoforms="isoform_id")
+
+# merge with the quantification data
+Monocyte_Isoforms_quantified_Functionality=merge(Monocyte_Isoforms_quantified[,c(1:8)], NumberOfDomains[,c(2,3,5)])
+
+print("Possibilities:")
+print(unique(Monocyte_Isoforms_quantified_Functionality$functionality))
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3A1
+#| fig-cap: "Protein domain differences in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors"
+#| layout-ncol: 1
+
+# Run the analysis
+DonnorPlot=IsoformFunction(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "More_domains", MinimReads, ColorNames)
+
+Percentatge=rbind(Percentatge,
+                  data.table(DonnorPlot[[2]],
+                             Event="ProteinDomains"))
+
+AnnotationPerc=rbind(AnnotationPerc,
+                 data.table(DonnorPlot[[3]], Event="More_domains"))
+
+# Functional
+Functionality <- rbind(Functionality,
+                       data.table(PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "More_domains", MinimReads, ColorNames)[[1]], Event="More_domains"))
+
+```
+
+```{r, echo=FALSE, message=F, warning=F, eval=F}
+#| label: fig-3A1b
+#| fig-cap: "Protein domain differences in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors - barplot by expression"
+#| layout-ncol: 1
+
+# prepare the percentatges of funcitonal isoforms
+PercentgeTable=Monocyte_Isoforms_quantified %>% 
+    group_by(gene_id) %>%
+    mutate(across(colnames(Monocyte_Isoforms_quantified)[-c(1,8,9)], proportions, .names="{.col}_perc")) %>%
+    ungroup(.) %>%
+    mutate(across(everything(), ~replace_na(. , 0))) %>%
+    ungroup(.) %>%
+    mutate(LPS=rowMeans(select(., intersect(contains("LPS"), contains("_perc"))))) %>%
+    mutate(Exvivo=rowMeans(select(., intersect(contains("exVivo"), contains("_perc"))))) %>%
+    dplyr::select(gene_id, isoform_id, LPS, Exvivo)
+
+# Pfam annotations
+PfamA_output=fread("FinalIsoformAnnotation/pfam_all.result", skip=28, header=F, fill=T)
+colnames(PfamA_output)=c("isoform", "start", "end", "envelope_start", "envelope_end", "hmm_acc", "hmm_name", "type", "hmm_start", "hmm_end", "hmm_length", "bit_score", "E-value", "significance", "clan")
+
+# Significant threshoolds
+MinEVal = 0.001
+PfamA_output=PfamA_output[PfamA_output$`E-value` < MinEVal,]
+PfamA_output=PfamA_output[PfamA_output$bit_score > 20,]
+NumberOfDomains=data.table(table(PfamA_output$isoform))
+colnames(NumberOfDomains)=c("isoform_id", "num_domains")
+
+# Merge
+NumberOfDomains=merge(PercentgeTable, NumberOfDomains)
+NumberOfDomains$DomainUsage_LPS=NumberOfDomains$LPS*NumberOfDomains$num_domains
+NumberOfDomains$DomainUsage_Exvivo=NumberOfDomains$Exvivo*NumberOfDomains$num_domains
+
+```
+
+```{r, echo=FALSE, message=F, warning=F, eval=T}
+#| label: fig-3A1b
+#| fig-cap: "Number of protein domains in functional vs productive isoforms"
+#| layout-ncol: 1
+
+# Protein domains in functional, productive, novel, ensmbl canonical
+FuncProd_ProtDom=rbind(merge(data.table(FunctMaxORF[,c(2,3)],
+                                Type="Functionality"), NumberOfDomains[,c(1,3,4,5)],
+                     by="isoform_id"),
+                     merge(data.table(Productivity, Type="Productivity"),
+                           NumberOfDomains[,c(1,3,4,5)],
+                     by="isoform_id"))
+
+FuncProd_ProtDom=rbind(FuncProd_ProtDom,
+                     merge(data.table(Annotation, Type="Novel"),
+                           NumberOfDomains[,c(1,3,4,5)],
+                     by="isoform_id"))
+
+FuncProd_ProtDom=rbind(FuncProd_ProtDom,
+                     merge(data.table(EnsmblCanonical, Type="EnsmblCanonical"),
+                           NumberOfDomains[,c(1,3,4,5)],
+                     by="isoform_id"))
+
+# Outputs a bed file with either the values PRO (productive), PTC (premature termination codon, i.e. unproductive), NGO (no start codon), or NST (has start codon but no stop codon) appended to the end of the isoform name
+
+FuncProd_ProtDom[FuncProd_ProtDom$functionality.x %in% c("NGO","PTC","NST"),"functionality.x"]="non-productive"
+FuncProd_ProtDom$functionality.x=factor(FuncProd_ProtDom$functionality.x,
+                                        levels = c("functional","productive","Ensembl_canonical","novel",
+                                                   "non-functional","annotated","others",
+                                                   "non-productive"))
+                                                   #"PTC","NST","NGO"))
+  
+Colors=c("#BC3C29FF","#0072B5FF","#E18727FF","#20854EFF",#"grey30","grey60",
+         "#6F99ADFF","#7876B1FF","#EE4C97FF","#FFDC91FF")
+
+i=1
+Plots=list()
+for(OneType in unique(FuncProd_ProtDom$Type)){
+  
+  if(length(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)) == 2){
+    my_comparisons=list(c(as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[2])))
+  } else {
+    my_comparisons=list(c(as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[2])),
+                        c(as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[3])),
+                        c(as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)[4])))
+  }
+  
+  Plots[[OneType]]=ggbarplot(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,], 
+            x = "functionality.x", y = "num_domains", id = "isoform_id", 
+            fill = "functionality.x", line.color = "gray", line.size = 0.1, 
+            short.panel.labs = FALSE, facet.by = "Type", add = "mean_ci") + 
+    ylab("Mean number of domains") +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test", label.y = c(1.75)) +
+    scale_fill_manual(values = Colors[i:(i+length(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x)))]) + theme(axis.title.x = element_blank(), legend.position = "none")
+  
+  i=i+length(unique(FuncProd_ProtDom[FuncProd_ProtDom$Type == OneType,]$functionality.x))
+  SavePPT(PPT, Plots[[OneType]], paste0(OneType,"_ProtDom.pdf"), 2, 4)
+}
+
+Plots
+
+```
+
+## Summary
+
+```{r, echo=FALSE, eval=T, eval=F}
+library(plyr)
+
+Percentatge <- ddply(Percentatge, "Name",
+                   transform, label_ypos=cumsum(Percentatge))
+Percentatge=Percentatge[Percentatge$Event != "Isoform Subtypes",]
+Percentatge=Percentatge[Percentatge$Event != "Splicing event",]
+
+Plot=ggplot(data=Percentatge, aes(x=Name, y=Percentatge, fill=Type)) +
+    geom_bar(stat="identity") +
+    geom_text(aes(y=label_ypos, label=paste(round(Percentatge,1),"%", sep="")), vjust=1.6, color="white", size=3.5) +
+    scale_fill_brewer(palette="Paired") + facet_grid(.~Event, scales = "free", space = "free") +
+    theme(axis.text = element_text(size = rel(1), face="bold"), 
+          strip.text = element_text(size = rel(0.75),face = "bold"), 
+          legend.position = "top",
+          legend.title = element_text(size = rel(1),face = "bold"), 
+          legend.text = element_text(size = rel(0.75),face = "bold"), 
+          axis.title = element_text(size = rel(1),face = "bold"),
+          axis.text.x=element_text(hjust=1, angle = 90)) +
+  theme_minimal() +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"), 
+          legend.position = "none")
+Plot
+
+SavePPT(PPT, Plot, "Summary_Functionality.pdf", 4, 6)
+
+```
+
+## 2. Translation
+
+Increase of isoforms deteced in RiboSeq data.
+
+```{r, echo=FALSE, message=F, warning=F}
+
+# Load metadata
+SraRunTable=data.frame(fread("RiboSeq/SraRunTable.csv"))
+MinimReads=0
+
+# save the PATH of the folder
+PATH_NAME="../VerySensitiveQ30/"
+
+# list all the files in the folder
+FileNames=as.vector(list.files(PATH_NAME))
+
+RNASeqFinal=data.table()
+for(Name in FileNames){
+  Data=fread(paste0(PATH_NAME, Name))
+  Data=Data[Data$V2 > MinimReads,]
+  RNASeqFinal=rbind(RNASeqFinal,
+                    data.table(Treatment=SraRunTable[SraRunTable$FileName == 
+                                          sub("_.*", "", Name), ]$treatment,
+                                isoform_id=Data$V1,
+                                expression=Data$V2,
+                                functionality="Transcribed"))
+}
+RNASeqFinal=unique(RNASeqFinal[,c(2,4)])
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+
+PATH_RiboSeq="../Uniquely_m1_best_strata/"
+RiboSeq=list.files(PATH_RiboSeq)
+RiboSeqFinal=data.table()
+for(Name in RiboSeq){
+  Data=fread(paste0(PATH_RiboSeq, Name))
+  Data=Data[Data$V2 > MinimReads,]
+  SraRunTable[SraRunTable$FileName == sub("_.*", "", Name), ]
+  RiboSeqFinal=rbind(RiboSeqFinal,
+                     data.table(Treatment=SraRunTable[SraRunTable$FileName == sub("_.*", "", Name), ]$treatment,
+                                isoform_id=Data$V1,
+                                expression=Data$V2,
+                                functionality="Trasnlated"))
+}
+RiboSeqFinal=unique(RiboSeqFinal[,c(2,4)])
+
+Selected=RNASeqFinal$isoform_id
+  
+# merge with the data
+Monocyte_Isoforms_quantified_Functionality=merge(Monocyte_Isoforms_quantified[Monocyte_Isoforms_quantified$isoform_id %in% Selected,], RiboSeqFinal, all.x=T)
+Monocyte_Isoforms_quantified_Functionality[is.na(Monocyte_Isoforms_quantified_Functionality$functionality),"functionality"]="not translated"
+
+print("Possibilities:")
+unique(Monocyte_Isoforms_quantified_Functionality$functionality)
+
+```
+
+### a. Pie plot
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3Pie
+#| fig-cap: "Translated isoform usage, Pie plot"
+#| layout-ncol: 1
+
+Monocyte=fread("FinalIsoformAnnotation/Monocyte_Isoforms.final.bed")
+
+AllIsofroms=merge(RNASeqFinal, Monocyte[,4], all=T, by.x="isoform_id", by.y="V4")
+AllIsofroms=merge(AllIsofroms, RiboSeqFinal, all.x=T)
+Finaltable <- AllIsofroms %>%
+  mutate(Type = case_when(
+  is.na(functionality.x) & is.na(functionality.y) ~ "Not detectable",
+  functionality.x == "Transcribed" & is.na(functionality.y) ~ "Only transcribed",
+  functionality.x == "Transcribed" & functionality.y == "Trasnlated" ~ "Transcribed\nand translated",
+  TRUE ~ "Only translated"))
+
+FileNames=list.files("RiboSeqData/Salmon_RNASeq/")
+
+RNASeqSalmonCount=data.table()
+for(FileName in FileNames){
+  Data=fread(paste0("RiboSeqData/Salmon_RNASeq/", FileName, "/quant.sf"))[,c(1,4)]
+  RNASeqSalmonCount=rbind(RNASeqSalmonCount,
+                    data.table(Treatment=paste0(SraRunTable[SraRunTable$FileName == 
+                                          sub("_.*", "", FileName), ]$treatment, "_",
+                                          SraRunTable[SraRunTable$FileName == 
+                                          sub("_.*", "", FileName), ]$FileName),
+                              isoform_id=Data$Name,
+                              tpm=Data$TPM))
+}
+
+PieChartData <- tibble(isoform = unique(Monocyte$V4)) %>%
+  mutate(in_salmon = isoform %in% unique(RNASeqSalmonCount[RNASeqSalmonCount$tpm >
+                                                           0,]$isoform_id),
+        in_unique = isoform %in% unique(RNASeqFinal$isoform_id),
+        category = case_when(
+            in_salmon & in_unique ~ "Both Salmon and Unique Reads",
+            in_salmon & !in_unique ~ "Only Salmon",
+            !in_salmon & in_unique ~ "Only Unique Reads",
+            TRUE ~ "Not Detected"))
+
+Finaltable[Finaltable$isoform_id %in% PieChartData[PieChartData$category ==
+                                                     "Not Detected",]$isoform &
+                    Finaltable$Type == "Not detectable","Type"]="Not expressed"
+
+PieChartData=Finaltable %>% count(Type) %>% 
+  mutate(percent = round(n / sum(n) * 100, 1), 
+         label = paste0("\n", n, " (", percent, "%)"))
+                           
+PiePlot <- ggplot(PieChartData, aes(x = "", y = n, fill = Type)) +
+  geom_col(width = 1, color = "white") + coord_polar(theta = "y") + 
+  geom_text(aes(label = label), position = position_stack(vjust = 0.5),
+            size = 4) + labs(x = NULL, y = NULL) + theme_void() +
+  theme(legend.position = "right") + scale_fill_manual(values = c(ColorNames[5], "grey50", 
+                                            ColorNames[3], ColorNames[7], ColorNames[8]))
+PiePlot
+SavePPT(PPT, PiePlot, "TranslatedPiePlot.pdf", 4, 6)
+
+```
+
+### b. Size plot
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3Pie
+#| fig-cap: "Translated isoform usage, size differences"
+#| layout-ncol: 1
+
+### Transcript length distribution
+ExtractInfoFromGTF<-function(FileName){
+  GTFFile=fread(FileName, header=F) # open GTF
+  LengthTable=GTFFile %>% subset(V3=="exon") %>%
+    mutate(transcript_id=sub('".*','',sub('.*transcript_id "','',V9))) %>%
+    mutate(gene_id=sub('".*','',sub('.*gene_id "','',V9))) %>%
+    mutate(gene_type=sub('".*','',sub('.*gene_type "','',V9))) %>%
+    mutate(ExonLength=V5-V4+1) %>% group_by(transcript_id) %>%
+    mutate(TranscriptLength=sum(ExonLength))
+  return(LengthTable[,c(10:14)]) # return table
+}
+
+# Run the function in the reference genome and in the reference transcriptome
+FLAIR=unique(ExtractInfoFromGTF("FinalIsoformAnnotation/Monocyte_Isoforms.final.gtf")[,c(1,2,5)])
+FinalTableSize=merge(FLAIR, Finaltable, by.x="transcript_id", by.y="isoform_id", all=T)
+FinalTableSize$Type <- as.factor(FinalTableSize$Type)
+ReferenceGroup <- FinalTableSize[which(FinalTableSize$Type == 
+                                         "Not detectable"),]$TranscriptLength
+ComparisonGroups <- unique(FinalTableSize[FinalTableSize$Type != 
+                                            "Not detectable",]$Type)
+WilcoxResults <- data.table()
+for (Group in ComparisonGroups) {
+  TestGroup <- FinalTableSize[FinalTableSize$Type == Group,]$TranscriptLength
+  result <- wilcox.test(TestGroup, ReferenceGroup)
+  WilcoxResults=rbind(WilcoxResults, data.table(Type=Group, MeanTest=mean(TestGroup),
+                              MedianTest=median(TestGroup), MeanRef=mean(ReferenceGroup),
+                              MedianRef=median(ReferenceGroup), Pvalue=result$p.value))
+}
+
+# Print results
+WilcoxResults$Padj=p.adjust(WilcoxResults$Pvalue, method = "fdr")
+WilcoxResults
+# Define your custom alpha values per Type
+AphaPerGroup <- c("Not detectable" = 0.8, "Not expressed" = 0.7, "Only transcribed" = 0.8, 
+                  "Only translated" = 1, "Transcribed\nand translated" = 0.3)
+FinalTableSizePlot = FinalTableSize %>%
+  mutate(alphanum = AphaPerGroup[as.character(Type)]) %>%
+  group_by(Type) %>%
+  mutate(MedianLog10 = median(log10(TranscriptLength), na.rm = TRUE))
+# compute the proportion for each length
+
+LengthPlot=ggplot(FinalTableSizePlot, aes(x = log10(TranscriptLength), fill = Type, alpha = alphanum)) +
+  geom_histogram(aes(y=..count../sum(..count..), fill = Type), position="identity", binwidth = 0.1) +
+  ylab('Frequency') + geom_vline(aes(xintercept = MedianLog10, color = Type), linetype = "dashed", size = 0.3) +
+  xlab(expression(paste({Log[10]},'(transcript length)'))) +  scale_alpha_identity() +
+  theme_classic() + theme(axis.text = element_text(size = rel(0.75), hjust=1), 
+                          strip.text = element_text(size = rel(0.75)),
+            legend.position = "top", legend.title = element_text(size = rel(1),face = "bold"), legend.text = element_text(size = rel(0.75)),
+            axis.title = element_text(size = rel(1))) + scale_fill_manual(values = c(ColorNames[5], "grey50", 
+                                            ColorNames[3], ColorNames[7], ColorNames[8])) +
+  scale_color_manual(values = c(ColorNames[5], "grey50", 
+                                            ColorNames[3], ColorNames[7], ColorNames[8]))
+LengthPlot
+SavePPT(PPT, LengthPlot, "LengthPlot.pdf", 4, 3)
+
+```
+
+### c. Functional, productive and canonical translated isoforms
+
+```{r, echo=FALSE, message=F, warning=F, eval=T}
+#| label: fig-3A1b
+#| fig-cap: "Number of translated isoforms in functional vs productive isoforms"
+#| layout-ncol: 1
+
+# Translated isoforms in functional, productive, novel, ensmbl canonical
+FuncProd_Trans=merge(data.table(FunctMaxORF[,c(2,3)],
+                                Type="Functionality"), Monocyte_Isoforms_quantified_Functionality[,c(1,9,10)],
+                     by="isoform_id")
+FuncProd_Trans=rbind(FuncProd_Trans,
+                     merge(data.table(Productivity, Type="Productivity"),
+                           Monocyte_Isoforms_quantified_Functionality[,c(1,9,10)],
+                     by="isoform_id"))
+
+FuncProd_Trans=rbind(FuncProd_Trans,
+                     merge(data.table(Annotation, Type="Novel"),
+                           Monocyte_Isoforms_quantified_Functionality[,c(1,9,10)],
+                     by="isoform_id"))
+
+FuncProd_Trans=rbind(FuncProd_Trans,
+                     merge(data.table(EnsmblCanonical, Type="EnsmblCanonical"),
+                           Monocyte_Isoforms_quantified_Functionality[,c(1,9,10)],
+                     by="isoform_id"))
+
+FuncProd_Trans=rbind(FuncProd_Trans,
+                     merge(data.table(NumberOfDomains[,c(1,5)], Type="MostProteinDomains"),
+                           Monocyte_Isoforms_quantified_Functionality[,c(1,9,10)],
+                     by="isoform_id"))
+
+FuncProd_Trans[FuncProd_Trans$functionality.x == "no-predicted ORF" | FuncProd_Trans$functionality.x == "non-functional",
+               "functionality.x"]="non-functional"
+FuncProd_Trans[FuncProd_Trans$functionality.x == "PTC" | FuncProd_Trans$functionality.x == "NST" | 
+                 FuncProd_Trans$functionality.x == "NGO", "functionality.x"]="non-productive"
+
+FuncProd_Trans$functionality.x=factor(FuncProd_Trans$functionality.x,
+                                    levels = c("functional","productive","Ensembl_canonical","novel","More_domains",
+                                               "non-productive","non-functional","annotated",
+                                               "others","Less_domains"))
+
+Colors=c("#BC3C29FF","#0072B5FF","#E18727FF","#20854EFF",#"grey30","grey60",
+         "#6F99ADFF","#7876B1FF","#EE4C97FF","#FFDC91FF", "#6F99ADFF","#7876B1FF")
+
+i=1
+Plots=list()
+Plots2=list()
+for(OneType in unique(FuncProd_Trans$Type)){
+  
+  if(length(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)) == 2){
+    my_comparisons=list(c(as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[2])))
+  } else {
+    my_comparisons=list(c(as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[2])),
+                        c(as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[3])),
+                        c(as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[1]),
+                          as.character(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)[4])))
+  }
+  
+  Funct_count <- FuncProd_Trans[FuncProd_Trans$Type == OneType,] %>%
+    group_by(functionality.x) %>%
+    count(functionality.y) %>% filter(functionality.y == "Trasnlated") %>% ungroup(.) %>%
+    mutate(Type=OneType)
+  
+  Plots[[OneType]]=ggbarplot(Funct_count, 
+            x = "functionality.x", y = "n",
+            fill = "functionality.x", line.color = "gray", line.size = 0.1, 
+            short.panel.labs = FALSE, facet.by = "Type") +
+    ylab("Number of translated isoforms") +
+    scale_fill_manual(values = Colors[i:(i+length(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)))]) + theme(axis.title.x = element_blank(), legend.position = "none")
+  
+  SavePPT(PPT, Plots[[OneType]], paste0(OneType,"_Translated.pdf"), 2, 4)
+  
+    
+  Funct_count <- FuncProd_Trans[FuncProd_Trans$Type == OneType,] %>%
+    group_by(functionality.x) %>%
+    count(functionality.y) %>%
+    mutate(Type=OneType) %>%
+    group_by(functionality.x) %>%
+    mutate(proportion = n / sum(n)) %>%
+    filter(functionality.y == "Trasnlated") %>% ungroup(.) %>%
+    ungroup()
+  
+    Plots2[[OneType]]=ggbarplot(Funct_count, 
+            x = "functionality.x", y = "proportion",
+            fill = "functionality.x", line.color = "gray", line.size = 0.1, 
+            short.panel.labs = FALSE, facet.by = "Type") +
+    ylab("Proportion of translated isoforms") +
+    scale_fill_manual(values = Colors[i:(i+length(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x)))]) + theme(axis.title.x = element_blank(), legend.position = "none")
+  
+  i=i+length(unique(FuncProd_Trans[FuncProd_Trans$Type == OneType,]$functionality.x))
+  SavePPT(PPT, Plots2[[OneType]], paste0(OneType,"_Translated_Prop.pdf"), 2, 4)
+  
+}
+Plots
+Plots2
+
+```
+
+### d. Translated isoform usage
+
+```{r, echo=FALSE, message=F, warning=F}
+#| label: fig-3G1
+#| fig-cap: "Translated isoform usage difference in LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Mean of all donnors"
+#| layout-ncol: 1
+
+# Run the analysis
+# filter the isoforms that at least have two different functionalities, including the one we are interested
+Finaldata<-PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "Trasnlated", MinimReads, ColorNames)
+# Functional
+Functionality <- rbind(Functionality,
+                       data.table(PercFunct(Monocyte_Isoforms_quantified, Monocyte_Isoforms_quantified_Functionality, "Trasnlated", MinimReads, ColorNames)[[1]], Event="Trasnlated"))
+
+IsofUsageTrans=Finaldata[[1]] %>% 
+  pivot_longer(cols = contains("Functional"), names_to = "Treatment", values_to = "Isoform_Usage") %>%
+  mutate(Treatment=factor(sub("_Functional","", Treatment), level=c("Exvivo","LPS")))
+
+TranslatedUsage=ggpaired(IsofUsageTrans, x = "Treatment", y = "Isoform_Usage", id = "Gene", color = "Treatment", line.color = "gray", line.size = 0.1, short.panel.labs = FALSE) + scale_color_manual(values = c("Exvivo" = "#6F99ADFF", "LPS" = "#BC3C29FF")) + 
+  stat_compare_means(comparisons = list(c("Exvivo","LPS")), method = "wilcox.test", paired = T)
+TranslatedUsage
+
+SavePPT(PPT, TranslatedUsage, "TranslatedUsage.pdf", 4, 6)
+
+```
+
+## 3. Mass Spectometry
+
+### a. Unique peptides
+
+-   Our MS:
+
+```{r MS_unique_peptides_ours, echo=F, message=T, warning=F, eval=T}
+
+# read the peptides
+peptide_separate <- fread("MassSpect/MaxQuant_JorgC_Paula/JAL_0489_HumanMonocyte/peptides.txt") %>%
+  select(Sequence, Proteins, `Intensity NON`, `Intensity STIM`) %>%
+  filter(!grepl("REV_", Proteins)) %>% filter(!grepl("CON_", Proteins)) %>%
+  separate_rows(Proteins, sep = ";") %>%
+  filter(grepl("gene_", Proteins)) %>%
+  rename(`Intensity NON`="Intensity_NON_peptide", 
+         `Intensity STIM`="Intensity_STIM_peptide") %>%
+  filter(!(Intensity_NON_peptide == 0 & Intensity_STIM_peptide == 0))
+
+# go from gene_name to isoform id
+fasta=fread("FinalIsoformAnnotation/Monocyte_Isoforms_predictedprot.final.faa", header=F) %>%
+  filter(grepl(">",V1))
+fasta$transcript_id=sub("\t.*","", sub(">","", fasta$V1))
+fasta$Proteins=sub(".*gene","gene", sub("\\|.*","", fasta$V1))
+
+peptides_isoform=unique(merge(peptide_separate, fasta[,c(2,3)]), all.x=T)
+
+# merge with the annotations
+isoform_info=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt")
+peptides_isoform=unique(merge(peptides_isoform, isoform_info[,c(1,7)], 
+                              by.x="transcript_id", by.y="isoform"),all.x=T)
+peptides_isoform=unique(merge(peptides_isoform, FunctMaxORF[,c(1,2)], 
+                              by.x="transcript_id", by.y="isoform_id"), all.x=T)
+
+# Functional, productive, Ensembl canonical and translated isoforms
+FuncProdEnsmblTransl=rbind(data.table(FunctMaxORF[,c(2,3)], Type="Functionality"),
+                           data.table(Productivity, Type="Productivity"),
+                           data.table(EnsmblCanonical, Type="EnsmblCanonical"),
+                           data.table(Monocyte_Isoforms_quantified_Functionality[,c(1,10)],
+                                      Type="Translation"))
+FuncProdEnsmblTransl[FuncProdEnsmblTransl$functionality %in% c("NGO", "PTC","NST"),"functionality"]="non-productive"                           
+peptide_unique_isoform_functionality=unique(merge(peptides_isoform, FuncProdEnsmblTransl, 
+                              by.x="transcript_id", by.y="isoform_id", all.x=T))
+
+peptide_unique_isoform_functionality_filtered <- peptide_unique_isoform_functionality %>%
+  group_by(Sequence, Type) %>%
+  filter(n_distinct(functionality) == 1) %>%
+  ungroup()
+
+Ours_Intensity=unique(peptide_unique_isoform_functionality_filtered[,c(2:9)])
+
+FuncitonalityUniquePeptides=unique(peptide_unique_isoform_functionality_filtered[,c("Sequence", "functionality", "Type")])
+
+FuncitonalityUniquePeptidesProp=FuncitonalityUniquePeptides %>%
+  group_by(functionality, Type) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(Type) %>%
+  mutate(percentage = count / sum(count) * 100) %>%
+  ungroup()
+  
+FuncitonalityUniquePeptidesProp$functionality=factor(FuncitonalityUniquePeptidesProp$functionality,
+              levels=c("functional", "productive", "Ensembl_canonical", "Trasnlated", 
+                       "non-productive", "non-functional", "others", "not translated"))
+FuncitonalityUniquePeptidesProp$Type=factor(FuncitonalityUniquePeptidesProp$Type,
+              levels=c("Functionality", "Productivity", "EnsmblCanonical", "Translation"))
+
+UniquePeptides <- ggplot(FuncitonalityUniquePeptidesProp, aes(x = Type, y = percentage, fill = functionality)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(percentage, 2)), 
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_manual(values = ColorNames) +
+  theme_bw() + xlab("") + ylab("Percentatge")+
+  theme(axis.text = element_text(size = rel(1)), strip.text = element_text(size = rel(0.75)), 
+    legend.position = "top", legend.title = element_text(size = rel(1)), 
+    legend.text = element_text(size = rel(0.75)), axis.title = element_text(size = rel(1)), 
+    axis.text.x = element_text(), panel.border = element_blank(),
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"))
+UniquePeptides
+SavePPT(PPT, UniquePeptides, "UniquePeptidesType_OurMS.pdf", 6, 4)
+
+FuncitonalityUniquePeptidesProp_All=FuncitonalityUniquePeptidesProp
+
+
+FuncitonalityUniquePeptidesProp_All=data.table(FuncitonalityUniquePeptidesProp_All,
+                                               Data="Ours")
+```
+
+-   PXD004352:
+
+```{r MS_unique_peptides_PXD004352, echo=F, message=T, warning=F, eval=T}
+
+# read the peptides
+peptide_separate <- fread("MassSpect/MaxQuant022025/peptides.txt") %>%
+  select(Sequence, Proteins, contains("Intensity MO.classical_")) %>%
+  filter(!grepl("REV_", Proteins)) %>% filter(!grepl("CON_", Proteins)) %>%
+  separate_rows(Proteins, sep = ";") %>%
+  filter(grepl("-|ENS", Proteins)) %>%
+  filter(rowSums(across(contains("Intensity MO.classical_"))) != 0)
+
+# merge with the annotations
+peptides_isoform=unique(merge(peptide_separate, isoform_info[,c(1,7)], 
+                              by.x="Proteins", by.y="isoform"),all.x=T)
+peptides_isoform=unique(merge(peptide_separate, FunctMaxORF[,c(1,2)], 
+                              by.x="Proteins", by.y="isoform_id"), all.x=T)
+
+peptide_unique_isoform_functionality=unique(merge(peptides_isoform, FuncProdEnsmblTransl, 
+                              by.x="Proteins", by.y="isoform_id", all.x=T))
+
+peptide_unique_isoform_functionality_filtered <- peptide_unique_isoform_functionality %>%
+  group_by(Sequence, Type) %>%
+  filter(n_distinct(functionality) == 1) %>%
+  ungroup()
+
+PXD004352_Intensity=unique(peptide_unique_isoform_functionality_filtered[,c(2:12)])
+
+FuncitonalityUniquePeptides=unique(peptide_unique_isoform_functionality_filtered[,c("Sequence", "functionality", "Type")])
+
+FuncitonalityUniquePeptidesProp=FuncitonalityUniquePeptides %>%
+  group_by(functionality, Type) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(Type) %>%
+  mutate(percentage = count / sum(count) * 100) %>%
+  ungroup()
+  
+FuncitonalityUniquePeptidesProp$functionality=factor(FuncitonalityUniquePeptidesProp$functionality,
+              levels=c("functional", "productive", "Ensembl_canonical", "Trasnlated", 
+                       "non-productive", "non-functional", "others", "not translated"))
+FuncitonalityUniquePeptidesProp$Type=factor(FuncitonalityUniquePeptidesProp$Type,
+              levels=c("Functionality", "Productivity", "EnsmblCanonical", "Translation"))
+
+UniquePeptides <- ggplot(FuncitonalityUniquePeptidesProp, aes(x = Type, y = percentage, fill = functionality)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(percentage, 2)), 
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_manual(values = ColorNames) +
+  theme_bw() + xlab("") + ylab("Percentatge")+
+  theme(axis.text = element_text(size = rel(1)), strip.text = element_text(size = rel(0.75)), 
+    legend.position = "top", legend.title = element_text(size = rel(1)), 
+    legend.text = element_text(size = rel(0.75)), axis.title = element_text(size = rel(1)), 
+    axis.text.x = element_text(), panel.border = element_blank(),
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"))
+UniquePeptides
+SavePPT(PPT, UniquePeptides, "UniquePeptidesType_PXD004352.pdf", 6, 4)
+
+```
+
+-   Shared:
+
+```{r MS_unique_peptides_shared, echo=F, message=T, warning=F, eval=T}
+
+FuncitonalityUniquePeptidesProp_All=rbind(FuncitonalityUniquePeptidesProp_All, 
+                                          data.table(FuncitonalityUniquePeptidesProp,
+                                                     Data="PXD004352"))
+
+UniquePeptides <- ggplot(FuncitonalityUniquePeptidesProp_All, aes(x = Type, y = percentage, fill = functionality)) +
+  geom_bar(stat = "identity") + facet_grid(Data~.) +
+  geom_text(aes(label = round(percentage, 2)), 
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_manual(values = ColorNames) +
+  theme_bw() + xlab("") + ylab("Percentatge")+
+  theme(axis.text = element_text(size = rel(1)), strip.text = element_text(size = rel(0.75)), 
+    legend.position = "top", legend.title = element_text(size = rel(1)), 
+    legend.text = element_text(size = rel(0.75)), axis.title = element_text(size = rel(1)), 
+    axis.text.x = element_text(), panel.border = element_blank(),
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black"))
+UniquePeptides
+SavePPT(PPT, UniquePeptides, "UniquePeptidesType_Both.pdf", 6, 5)
+
+Classification=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt")
+Classification=unique(merge(Classification[,c("isoform","associated_gene")], FunctMaxORF[,c(1,2)], 
+      by.x="isoform", by.y="isoform_id"))
+Classification=unique(merge(Classification, fasta[,c(2,3)], 
+      by.x="isoform", by.y="transcript_id"))
+Functionality$Gene = sub("-.*", "", Functionality$Gene)
+
+```
+
+### b. Per gene intensity difference of 25% more funcitonal, productive and canonical
+
+-   Our MS:
+
+```{r MS_Ours_per_gene, echo=F, message=T, warning=F, eval=T}
+
+# protein groups
+protein_separate=fread("MassSpect/MaxQuant_JorgC_Paula/JAL_0489_HumanMonocyte/proteinGroups.txt") %>%
+  filter(Reverse != "+", `Potential contaminant` != "+") %>%
+  select(`Majority protein IDs`,`LFQ intensity NON`, `LFQ intensity STIM`) %>%
+  mutate(Prot_ids=`Majority protein IDs`) %>%
+  separate_rows(`Majority protein IDs`, sep = ";") %>%
+  rename(`LFQ intensity NON`="LFQ_NON", 
+         `LFQ intensity STIM`="LFQ_STIM",
+         `Majority protein IDs` = "Proteins")
+
+```
+
+```{r Uniprot_toGene_Connect, echo=FALSE, message=F, warning=F, eval=F}
+
+## Get all Uniprot ids to gene symbol
+
+library(httr)
+
+AllProtID=unique(unlist(strsplit(protein_separate$Prot_ids,";")))
+AllProtID=AllProtID[!grepl("gene_",AllProtID)]
+
+isJobReady <- function(jobId) {
+  pollingInterval = 5
+  nTries = 20
+  for (i in 1:nTries) {
+    url <- paste("https://rest.uniprot.org/idmapping/status/", jobId, sep = "")
+    r <- GET(url = url, accept_json())
+    status <- content(r, as = "parsed")
+    if (!is.null(status[["results"]]) || !is.null(status[["failedIds"]])) {
+      return(TRUE)
+    }
+    if (!is.null(status[["messages"]])) {
+      print(status[["messages"]])
+      return (FALSE)
+    }
+    Sys.sleep(pollingInterval)
+  }
+  return(FALSE)
+}
+
+getResultsURL <- function(redirectURL) {
+  if (grepl("/idmapping/results/", redirectURL, fixed = TRUE)) {
+    url <- gsub("/idmapping/results/", "/idmapping/stream/", redirectURL)
+  } else {
+    url <- gsub("/results/", "/results/stream/", redirectURL)
+  }
+}
+
+files = list(
+  ids = paste0(AllProtID,collapse=","),
+  from = "UniProtKB_AC-ID",
+  to = "UniProtKB"
+)
+r <- POST(url = "https://rest.uniprot.org/idmapping/run", body = files, encode = "multipart", accept_json())
+submission <- content(r, as = "parsed")
+
+if (isJobReady(submission[["jobId"]])) {
+  url <- paste("https://rest.uniprot.org/idmapping/details/", submission[["jobId"]], sep = "")
+  r <- GET(url = url, accept_json())
+  details <- content(r, as = "parsed")
+  url <- getResultsURL(details[["redirectURL"]])
+  # Using TSV format see: https://www.uniprot.org/help/api_queries#what-formats-are-available
+  url <- paste(url, "?format=tsv", sep = "")
+  r <- GET(url = url, accept_json())
+  resultsTable = read.table(text = content(r), sep = "\t", header=TRUE)
+  print(resultsTable)
+}
+
+```
+
+```{r Ours_Uniprot_toGene_Ours, echo=FALSE, message=F, warning=F}
+
+resultsTable=unique(fread("MassSpect/UniProt_Ours.tsv"))
+
+# Conversion table
+resultsTable$Proteins=resultsTable$Entry
+resultsTable$Gene.Names=resultsTable$`Gene Names`
+# remove everything unreviewed
+resultsTable[resultsTable$Reviewed != "reviewed","Gene.Names"]="unreviewed"
+resultsTable=unique(resultsTable[,c("Proteins", "Gene.Names")])
+resultsTable$gene_id=NA
+
+# remove fusions
+Classification$Gene.Names=Classification$associated_gene
+# Remove fusions
+Classification=Classification %>%
+  filter(!is.na(Proteins)) %>%
+  filter(!grepl("_", Gene.Names))
+resultsTable_Ours=rbind(resultsTable, unique(Classification[,c("Proteins", "Gene.Names","gene_id")]))
+resultsTable_Ours$Gene.Names=sub(" .*","",resultsTable_Ours$Gene.Names)
+
+protein_separate_names=merge(protein_separate, resultsTable_Ours, all.x=T)
+protein_separate_names=protein_separate_names[!is.na(protein_separate_names$Gene.Names),]
+protein_separate_names=unique(protein_separate_names[protein_separate_names$Gene.Names != "unreviewed",])
+
+protein_per_gene=protein_separate_names %>%
+  group_by(across(-c(Proteins,Gene.Names,gene_id))) %>%
+  filter(n_distinct(Gene.Names) == 1) %>%
+  filter(n_distinct(gene_id[!is.na(gene_id)]) == 1) %>%
+  dplyr::summarise(Proteins = paste(unique(Gene.Names), collapse = ";"),
+                   gene_id = paste(unique(gene_id[!is.na(gene_id)]), collapse = ";"), .groups = "drop") %>%
+  filter(rowSums(select(., contains("LFQ"))) != 0) %>%
+  group_by(Proteins, gene_id) %>%
+    summarise(LFQ_NON = sum(across(contains("LFQ_NON")), na.rm = TRUE),
+            LFQ_STIM = sum(across(contains("LFQ_STIM")), na.rm = TRUE),
+            .groups = "drop")
+
+```
+
+```{r MS_Ours_per_gene, echo=F, message=T, warning=F, eval=T}
+
+GeneFuncitonality=unique(merge(protein_per_gene , Functionality, 
+    by.x="gene_id", by.y="Gene", all.y=T) %>% 
+    filter(!(is.na(LFQ_STIM) & is.na(LFQ_NON))) %>%
+    select(Proteins, gene_id, LFQ_NON, LFQ_STIM, LPS_Functional, Exvivo_Functional, Type, Event))
+
+GeneFuncitonality$Expression=ifelse(GeneFuncitonality$LPS_Functional >
+                                    GeneFuncitonality$Exvivo_Functional,
+                                    "LPS","ex vivo")
+
+GeneFuncitonality$Type_Full=GeneFuncitonality$Type
+
+GeneFuncitonality[which(GeneFuncitonality$Type == "Similar" |
+                    GeneFuncitonality$Expression != "LPS"), "Type"]="Rest"
+GeneFuncitonality[which(GeneFuncitonality$Type == "50% more" |
+                          GeneFuncitonality$Type == "25% more"), "Type"]="50% and\n25% more"
+
+GeneFuncitonality = GeneFuncitonality[!(GeneFuncitonality$LFQ_NON == 0 & 
+                                         GeneFuncitonality$LFQ_STIM == 0), ]
+
+GeneFuncitonality$Delta_LFQ=log2(GeneFuncitonality$LFQ_STIM/GeneFuncitonality$LFQ_NON)
+
+GeneFuncitonality=GeneFuncitonality[GeneFuncitonality$Event %in% c("Functionality", "Productivity", "Ensembl_canonical"),]
+
+GeneFuncitonality$Event=factor(GeneFuncitonality$Event, levels = c("Functionality", "Productivity", "Ensembl_canonical"))
+
+Statistics <- GeneFuncitonality %>%
+  group_by(Event) %>% 
+  summarise(Median_50 = median(Delta_LFQ[Type == "50% and\n25% more"], na.rm = TRUE),
+            Median_rest = median(Delta_LFQ[Type == "Rest"], na.rm = TRUE),
+            P_value = wilcox.test(Delta_LFQ[Type == "50% and\n25% more"],
+                                  Delta_LFQ[Type == "Rest"],paired = FALSE)$p.value) %>%
+  ungroup() %>%
+  mutate(direction = case_when(Median_50 > Median_rest ~ "More in 50% or 25% more",
+                               Median_50 < Median_rest ~ "More in the rest",
+                               TRUE ~ "no_difference")) %>%
+  mutate(Data="Ours")
+Statistics
+
+GeneFuncitonality$Data="Ours"
+
+# Compute the 0.1% and 99% percentiles
+lower <- quantile(GeneFuncitonality$Delta_LFQ, 0.01)  # 1 percentile
+upper <- quantile(GeneFuncitonality$Delta_LFQ, 0.99)   # 99 percentile
+GeneFuncitonality$Delta_LFQ_capped <- pmin(pmax(GeneFuncitonality$Delta_LFQ, lower), upper)
+
+Boxplot=ggviolin(GeneFuncitonality, x = "Type", y = "Delta_LFQ_capped", fill="Type", alpha = 0.5, add=c("boxplot")) + facet_grid(.~Event) + 
+    stat_compare_means(comparisons = list(c("Rest","50% and\n25% more")), method = "wilcox.test", paired = F) + 
+  scale_fill_manual(values = c("50% and\n25% more" = ColorNames[5], "Rest" = ColorNames[4])) + theme(legend.position = "none") + xlab("") + ylab("log2(LFQ 3h LPS / 0h)")
+Boxplot
+
+GeneFuncitonality_All=GeneFuncitonality
+
+```
+
+-   PXD004352:
+
+```{r, echo=FALSE, message=F, warning=F}
+
+protein_separate=fread("MassSpect/MaxQuant022025/proteinGroups.txt") %>%
+  filter(Reverse != "+", `Potential contaminant` != "+") %>%
+  select(`Majority protein IDs`,contains("LFQ intensity MO.classical_")) %>%
+  mutate(Prot_ids=`Majority protein IDs`) %>%
+  separate_rows(`Majority protein IDs`, sep = ";") %>%
+  filter(rowSums(select(., contains("LFQ"))) != 0)  %>%
+  rename(`Majority protein IDs` = "Proteins")
+
+```
+
+```{r Uniprot_toGene_Connect_PXD004352, echo=FALSE, message=F, warning=F, eval=F}
+
+## Get all Uniprot ids to gene symbol
+
+library(httr)
+
+AllProtID=unique(unlist(strsplit(proteinGroups_rm_cont$Majority.protein.IDs,";")))
+AllProtID=AllProtID[!AllProtID %in% Classification$isoform]
+
+# Extract the third element from each split
+AllProtID_Human <- sapply(strsplit(AllProtID, "\\|"), function(x) if(length(x) == 3) x[3] else NA)
+AllProtID_Human=unique(AllProtID_Human[!is.na(AllProtID_Human)])
+
+
+library(httr)
+
+isJobReady <- function(jobId) {
+  pollingInterval = 5
+  nTries = 20
+  for (i in 1:nTries) {
+    url <- paste("https://rest.uniprot.org/idmapping/status/", jobId, sep = "")
+    r <- GET(url = url, accept_json())
+    status <- content(r, as = "parsed")
+    if (!is.null(status[["results"]]) || !is.null(status[["failedIds"]])) {
+      return(TRUE)
+    }
+    if (!is.null(status[["messages"]])) {
+      print(status[["messages"]])
+      return (FALSE)
+    }
+    Sys.sleep(pollingInterval)
+  }
+  return(FALSE)
+}
+
+getResultsURL <- function(redirectURL) {
+  if (grepl("/idmapping/results/", redirectURL, fixed = TRUE)) {
+    url <- gsub("/idmapping/results/", "/idmapping/stream/", redirectURL)
+  } else {
+    url <- gsub("/results/", "/results/stream/", redirectURL)
+  }
+}
+
+files = list(
+  ids = paste0(AllProtID_Human,collapse=","),
+  from = "UniProtKB_AC-ID",
+  to = "UniProtKB"
+)
+r <- POST(url = "https://rest.uniprot.org/idmapping/run", body = files, encode = "multipart", accept_json())
+submission <- content(r, as = "parsed")
+
+if (isJobReady(submission[["jobId"]])) {
+  url <- paste("https://rest.uniprot.org/idmapping/details/", submission[["jobId"]], sep = "")
+  r <- GET(url = url, accept_json())
+  details <- content(r, as = "parsed")
+  url <- getResultsURL(details[["redirectURL"]])
+  # Using TSV format see: https://www.uniprot.org/help/api_queries#what-formats-are-available
+  url <- paste(url, "?format=tsv", sep = "")
+  r <- GET(url = url, accept_json())
+  resultsTable = read.table(text = content(r), sep = "\t", header=TRUE)
+  print(resultsTable)
+}
+
+# Enter the url
+
+```
+
+```{r Uniprot_toGene_PXD004352, echo=FALSE, message=F, warning=F}
+
+resultsTable=unique(fread("MassSpect/UniProt_PXD004352.tsv"))
+
+# Conversion table
+resultsTable$Proteins=resultsTable$`Entry Name`
+resultsTable$Gene.Names=resultsTable$`Gene Names`
+# remove everything unreviewed
+resultsTable[resultsTable$Reviewed != "reviewed","Gene.Names"]="unreviewed"
+resultsTable=unique(resultsTable[,c("Proteins", "Gene.Names")])
+resultsTable$gene_id=NA
+
+Classification$Proteins=Classification$isoform
+resultsTable_PXD004352=rbind(resultsTable, Classification[,c("Proteins", "Gene.Names","gene_id")])
+resultsTable_PXD004352$Gene.Names=sub(" .*","",resultsTable_PXD004352$Gene.Names)
+
+protein_separate$Proteins <- sapply(strsplit(protein_separate$Proteins, "\\|"), function(x) if(length(x) == 3) x[3] else x)
+
+protein_separate_names=merge(protein_separate, resultsTable_PXD004352, all.x=T)
+protein_separate_names=protein_separate_names[!is.na(protein_separate_names$Gene.Names),]
+protein_separate_names=unique(protein_separate_names[protein_separate_names$Gene.Names != "unreviewed",])
+
+protein_per_gene=protein_separate_names %>%
+  group_by(across(-c(Proteins, Gene.Names, gene_id))) %>%
+  filter(n_distinct(Gene.Names) == 1) %>%
+  filter(n_distinct(gene_id[!is.na(gene_id)]) == 1) %>%
+  summarise(Proteins = paste(unique(Gene.Names), collapse = ";"),
+            gene_id = paste(unique(gene_id[!is.na(gene_id)]), collapse = ";"), 
+            .groups = "drop") %>%
+  mutate(across(contains("LFQ"), ~ replace(., . == 0 | is.na(.), NA))) %>%
+  group_by(Proteins, gene_id, Prot_ids) %>%
+  summarise(LFQ_NON = median(c_across(contains("steady-state")), na.rm = TRUE),
+            LFQ_STIM = median(c_across(contains("activated")), na.rm = TRUE), .groups = "drop") %>%
+  group_by(Proteins, gene_id) %>%
+  summarise(LFQ_NON = sum(across(contains("LFQ_NON")), na.rm = TRUE),
+            LFQ_STIM = sum(across(contains("LFQ_STIM")), na.rm = TRUE),
+            .groups = "drop")
+
+```
+
+```{r MS_PXD004352_per_gene, echo=FALSE, message=F, warning=F, eval=T}
+
+GeneFuncitonality=unique(merge(protein_per_gene , Functionality, 
+    by.x="gene_id", by.y="Gene", all.y=T) %>% 
+    filter(!(is.na(LFQ_STIM) & is.na(LFQ_NON))) %>%
+    select(Proteins, gene_id, LFQ_NON, LFQ_STIM, LPS_Functional, Exvivo_Functional, Type, Event))
+
+GeneFuncitonality$Expression=ifelse(GeneFuncitonality$LPS_Functional >
+                                    GeneFuncitonality$Exvivo_Functional,
+                                    "LPS","ex vivo")
+GeneFuncitonality$Type_Full=GeneFuncitonality$Type
+GeneFuncitonality[which(GeneFuncitonality$Type == "Similar" |
+                    GeneFuncitonality$Expression != "LPS"), "Type"]="Rest"
+GeneFuncitonality[which(GeneFuncitonality$Type == "50% more" |
+                          GeneFuncitonality$Type == "25% more"), "Type"]="50% and\n25% more"
+
+GeneFuncitonality = GeneFuncitonality[!(GeneFuncitonality$LFQ_NON == 0 & 
+                                         GeneFuncitonality$LFQ_STIM == 0), ]
+
+GeneFuncitonality$Delta_LFQ=log2(GeneFuncitonality$LFQ_STIM/GeneFuncitonality$LFQ_NON)
+GeneFuncitonality[is.infinite(GeneFuncitonality$Delta_LFQ),"Delta_LFQ"]=NA
+
+GeneFuncitonality=GeneFuncitonality[GeneFuncitonality$Event %in% c("Functionality", "Productivity", "Ensembl_canonical"),]
+
+GeneFuncitonality$Event=factor(GeneFuncitonality$Event, levels = c("Functionality", "Productivity", "Ensembl_canonical"))
+
+Statistics <- rbind(Statistics, GeneFuncitonality %>%
+  group_by(Event) %>% 
+  summarise(Median_50 = median(Delta_LFQ[Type == "50% and\n25% more"], na.rm = TRUE),
+            Median_rest = median(Delta_LFQ[Type == "Rest"], na.rm = TRUE),
+            P_value = wilcox.test(Delta_LFQ[Type == "50% and\n25% more"],
+                                  Delta_LFQ[Type == "Rest"],paired = FALSE)$p.value) %>%
+  ungroup() %>%
+  mutate(direction = case_when(Median_50 > Median_rest ~ "More in 50% or 25% more",
+                               Median_50 < Median_rest ~ "More in the rest",
+                               TRUE ~ "no_difference")) %>%
+  mutate(Data="PXD004352")) %>%
+  mutate(Padj_FDR = p.adjust(P_value, method = "fdr"))
+Statistics
+
+GeneFuncitonality$Data="PXD004352"
+
+# Compute the 0.1% and 99% percentiles
+lower <- quantile(GeneFuncitonality$Delta_LFQ, 0.01, na.rm=TRUE)  # 1 percentile
+upper <- quantile(GeneFuncitonality$Delta_LFQ, 0.99, na.rm=TRUE)   # 99 percentile
+GeneFuncitonality$Delta_LFQ_capped <- pmin(pmax(GeneFuncitonality$Delta_LFQ, lower), upper)
+
+Boxplot=ggviolin(GeneFuncitonality, x = "Type", y = "Delta_LFQ_capped", fill="Type", alpha = 0.5, add=c("boxplot")) + facet_grid(.~Event) + 
+    stat_compare_means(comparisons = list(c("Rest","50% and\n25% more")), method = "wilcox.test", paired = F) + 
+  scale_fill_manual(values = c("50% and\n25% more" = ColorNames[5], "Rest" = ColorNames[4])) + theme(legend.position = "none") + xlab("") + ylab("log2(LFQ 3h LPS / 0h)")
+Boxplot
+
+```
+
+-   Shared:
+
+```{r MS_unique_peptides_shared, echo=F, message=T, warning=F, eval=T}
+
+Statistics
+GeneFuncitonality_All=rbind(GeneFuncitonality_All, GeneFuncitonality)
+
+Boxplot=ggviolin(GeneFuncitonality_All, x = "Type", y = "Delta_LFQ_capped", fill="Type", alpha = 0.5, add=c("boxplot")) + 
+  facet_grid(Data~Event, scales="free") + 
+  stat_compare_means(comparisons = list(c("Rest","50% and\n25% more")), method = "wilcox.test", paired = F) + 
+  scale_fill_manual(values = c("50% and\n25% more" = ColorNames[5], "Rest" = ColorNames[4])) + theme(legend.position = "none") + 
+  xlab("") + ylab("log2(LFQ 3h LPS / 0h)")
+Boxplot
+
+SavePPT(PPT, Boxplot, "DeltaExpression.pdf", 6, 8)
+
+Boxplot=ggviolin(GeneFuncitonality_All, x = "Type", y = "Delta_LFQ_capped", fill="white", 
+                  alpha = 0.5, color = "Type", add=c("boxplot")) + 
+    facet_grid(Data~Event, scales="free") +
+    stat_compare_means(comparisons = list(c("Rest","50% and\n25% more")), 
+                       method = "wilcox.test", paired = F) + 
+    scale_color_manual(values = c("50% and\n25% more" = ColorNames[5], "Rest" = ColorNames[4])) + 
+    theme(legend.position = "none") +
+    xlab("") + ylab("log2(LFQ 3h LPS / 0h)")
+Boxplot
+
+GeneFuncitonality_All$gene_id =sub("\\..*","",GeneFuncitonality_All$gene_id)
+GeneFuncitonality_All[GeneFuncitonality_All$Expression == "ex vivo","Type_Full"]="Rest"
+GeneFuncitonality_All[GeneFuncitonality_All$Type_Full != "50% more","Type_Full"]="Rest"
+
+```
+
+### c. mRNA 3h LPS and protein correlation after 12h LPS: PXD004352
+
+```{r RPKM_expression, echo=F, message=T, warning=F, eval=T}
+
+# use the metadata file to obtain the specific samples to process
+metadataJIArnaSeq=data.frame(fread("../../BulkRNASeq/Analysis_July2024//metadataJIArnaSeq_sex.txt"))
+rownames(metadataJIArnaSeq)=metadataJIArnaSeq$sampleName # add as rownames the sampleid
+
+# select samples
+metadataJIArnaSeq=metadataJIArnaSeq[which(metadataJIArnaSeq$tissue == "mono"),]
+metadataJIArnaSeq=metadataJIArnaSeq[which(metadataJIArnaSeq$disease == "healthy"),]
+
+# simplify patient id
+metadataJIArnaSeq$patient_id=sub("mono.*",".1",metadataJIArnaSeq$V1)
+metadataJIArnaSeq$patient_id=sub("LPS","",metadataJIArnaSeq$patient_id)
+metadataJIArnaSeq$patient_id=sub("exvivo","",metadataJIArnaSeq$patient_id)
+
+# patients, paired
+metadataJIArnaSeq=metadataJIArnaSeq[!metadataJIArnaSeq$patient_id %in% names(table(metadataJIArnaSeq$patient_id) < 2)[table(metadataJIArnaSeq$patient_id) < 2],]
+
+# order by treatment
+metadataJIArnaSeq=metadataJIArnaSeq[order(metadataJIArnaSeq$treatment),]
+
+print(metadataJIArnaSeq[,c(4,5,7,9,3)])
+
+# save the PATH of the folder
+PATH_NAME="../../BulkRNASeq/STAR_GeneCount_TwoPassMode/"
+
+# list all the files in the folder
+FileNames=data.table(list.files(PATH_NAME))
+FileNames$sample=sub("STAR_","",sub("ReadsPerGene.out.tab","",FileNames$V1))
+FileNames=FileNames[match(metadataJIArnaSeq$sampleName, FileNames$sample),]
+
+# select the specific files to use
+FileNames=FileNames[FileNames$sample %in% metadataJIArnaSeq$sampleName,]
+
+# create a list with all the counts by STAR for each condition and specie
+CountMatrix=data.table()
+for(File in FileNames$V1) { # for loop to open all the files in the ExpressOutputRNA-Seq PATH
+  SampleName=sub("STAR_",'',sub("ReadsPerGene.out.tab","",File)) # simplify the name
+  if(nrow(CountMatrix) == 0){ # if the matrix is empty
+    CountMatrix=fread(file=paste(PATH_NAME,File,sep="")) # open the count file
+    CountMatrix=CountMatrix[,c(1,4)] # select the columns
+    CountMatrix=CountMatrix[-c(1:4),] # remove unnecessary data
+    colnames(CountMatrix)=c("Geneid",SampleName) # change the column names
+  } else {
+    CountMatrix_2nd=fread(file=paste(PATH_NAME,File,sep="")) # open the count file
+    CountMatrix_2nd=CountMatrix_2nd[,c(1,4)] # select the columns
+    CountMatrix_2nd=CountMatrix_2nd[-c(1:4),] # remove unnecessary
+    colnames(CountMatrix_2nd)=c("Geneid",SampleName)  # change the column names
+    CountMatrix=merge(CountMatrix, CountMatrix_2nd, by="Geneid", all.x=T, all.y=T) # merge the counts for different samples by geneid
+    rm(CountMatrix_2nd)
+  }
+}
+
+CountMatrix=data.frame(CountMatrix) # transform as data.frame
+CountMatrix$Geneid=sub("\\..*","",CountMatrix$Geneid)
+
+library(biomaRt)
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+gene_lengths=getBM(attributes = c("ensembl_gene_id", "transcript_length", "external_gene_name"), 
+                      values = CountMatrix$Geneid, mart = mart) %>% 
+  group_by(ensembl_gene_id, external_gene_name) %>% summarise(gene_length=max(transcript_length))
+detach("package:biomaRt", unload = TRUE)
+
+# Merge
+CountMatrix_Length=merge(CountMatrix, gene_lengths, by.x="Geneid", by.y="ensembl_gene_id", all.x=T)
+
+# RPKM calculation
+RPKM <- CountMatrix_Length %>%
+  mutate(across(-c(Geneid, gene_length, external_gene_name), ~ .x / (sum(.x) / 1e6))) %>%
+  mutate(across(-c(Geneid, gene_length, external_gene_name), ~ .x / (gene_length / 1e3))) %>%
+  dplyr::mutate(RPKM_Mean_STIM = rowMeans(dplyr::select(., dplyr::contains("LPS")), na.rm = TRUE),
+                RPKM_Mean_NON = rowMeans(dplyr::select(., -dplyr::contains("LPS"), 
+                                          -Geneid, -gene_length, -external_gene_name), na.rm = TRUE)) %>%
+  select(Geneid, RPKM_Mean_STIM, RPKM_Mean_NON, external_gene_name)
+
+```
+
+```{r MS_RPKM_correlation, echo=F, message=T, warning=F, eval=T}
+
+Correlation_GeneFuncitonality_PXD004352=merge(GeneFuncitonality_All[GeneFuncitonality_All$Data != "Ours",], 
+           RPKM, by.x="gene_id", by.y="Geneid") %>%
+  mutate(across(.cols = contains(c("LFQ", "RPKM")), .fns = ~ ifelse(. == 0, NA, .)))
+
+correlations <- Correlation_GeneFuncitonality_PXD004352 %>%
+  group_by(Event, Type) %>%
+    summarise(
+    Correlation_NON = cor(LFQ_NON, RPKM_Mean_NON, method = "pearson", use = "complete.obs"),
+    Pval_NON = cor.test(LFQ_NON, RPKM_Mean_NON, method = "pearson")$p.value,
+    Correlation_STIM = cor(LFQ_STIM, RPKM_Mean_STIM, method = "pearson", use = "complete.obs"),
+    Pval_STIM = cor.test(LFQ_STIM, RPKM_Mean_STIM, method = "pearson")$p.value, .groups = "drop") %>%
+  pivot_longer(cols = c(Correlation_NON, Pval_NON, Correlation_STIM, Pval_STIM),
+    names_to = c(".value", "Condition"), names_pattern = "(.*)_(NON|STIM)") %>%
+  mutate(symbol = case_when(Pval <= 0.001 ~ "***", Pval <= 0.01  ~ "**", Pval <= 0.05  ~ "*", TRUE ~ ""))
+correlations
+
+Correlation_GeneFuncitonality_PXD004352=Correlation_GeneFuncitonality_PXD004352 %>%
+    pivot_longer(cols = c(LFQ_NON, LFQ_STIM, RPKM_Mean_NON, RPKM_Mean_STIM),
+    names_to = c(".value", "Condition"), names_pattern = "(.*)_(NON|STIM)") %>%
+  filter(LFQ != 0) %>%  filter(RPKM_Mean != 0)
+
+PlotGeneral=ggplot(Correlation_GeneFuncitonality_PXD004352[which(Correlation_GeneFuncitonality_PXD004352$LFQ != 0 | Correlation_GeneFuncitonality_PXD004352$RPKM_Mean != 0),], 
+       aes(x = LFQ, y = RPKM_Mean, color = Type)) +
+    geom_point(size=0.3) + geom_point(data = subset(Correlation_GeneFuncitonality_PXD004352,
+                                                    Type != "Rest"), aes(color = Type), size=0.6) +
+    theme_bw() + theme(panel.border = element_blank(), 
+                       panel.grid.major = element_blank(),
+                       panel.grid.minor = element_blank(),
+                       axis.line = element_line(colour = "black")) +
+    scale_color_manual(values = c(ColorNames[1],"grey80")) +
+    geom_smooth(aes(color = Type), method = "lm", se = TRUE, linewidth = 0.5, 
+                linetype="dashed") + facet_grid(Condition~Event) +
+    scale_x_log10() + scale_y_log10() + 
+    geom_text(
+        data = correlations,
+        aes(x = (max(Correlation_GeneFuncitonality_PXD004352$LFQ, na.rm = TRUE)/1000),
+            y = case_when(Type == "Rest" ~ max(Correlation_GeneFuncitonality_PXD004352$RPKM_Mean, na.rm = TRUE) * 0.6,
+                          Type != "Rest" ~ max(Correlation_GeneFuncitonality_PXD004352$RPKM_Mean, na.rm = TRUE) * 0.9),
+            label = paste0("Pearson's correlation for ", sub("\n", " ", Type), " ", round(Correlation, 3), symbol)),
+        color = "black", size = 3, inherit.aes = FALSE)
+
+SavePPT(PPT, PlotGeneral, "CorrelationPlot.pdf", 9, 4)
+
+```
+
+# 4. PLM
+
+PLM pseudolikelihood score per isoform.
+
+```{r, echo=FALSE, message=F, warning=F}
+
+# Functional isoform usage
+Functionality$Usage="Same"
+Functionality[Functionality$LPS_Functional > Functionality$Exvivo_Functional, "Usage"]="More in LPS"
+Functionality[Functionality$Exvivo_Functional > Functionality$LPS_Functional, "Usage"]="Less in LPS"
+
+# Minimum of expression for each "type"
+MinimReads=3
+  
+### Read expression
+Monocyte_Isoforms_quantified=fread("FinalIsoformAnnotation/Monocyte_Isoforms_quantified.counts.tsv", header=T)
+Monocyte_Isoforms_quantified$isoform=sub("_.*","",Monocyte_Isoforms_quantified$ids) # get the ids without the gene names
+Monocyte_Isoforms_quantified$Gene=sub(".*_","",Monocyte_Isoforms_quantified$ids)
+Monocyte_Isoforms_quantified$Gene=sub("\\..*","",Monocyte_Isoforms_quantified$Gene)
+
+# filter by expression of at least 3 in all samples (as flair)
+if(exists("MinimReads")){
+  Monocyte_Isoforms_quantified=Monocyte_Isoforms_quantified %>%
+    mutate(Sum_Reads=rowSums(select(., contains("batch")))) %>%
+    subset(Sum_Reads > MinimReads) %>% select(-c("Sum_Reads"))
+}
+
+# prepare the percentatges of funcitonal isoforms
+PercentgeTable=Monocyte_Isoforms_quantified %>% 
+    group_by(Gene) %>%
+    mutate(across(colnames(Monocyte_Isoforms_quantified)[-c(1,8,9)], proportions, .names="{.col}_perc")) %>%
+    ungroup(.) %>%
+    mutate(across(everything(), ~replace_na(. , 0))) %>%
+    ungroup(.) %>%
+    mutate(LPS=rowMeans(select(., intersect(contains("LPS"), contains("_perc"))))) %>%
+    mutate(Exvivo=rowMeans(select(., intersect(contains("exVivo"), contains("_perc"))))) %>%
+    group_by(Gene) %>% select(ids, Gene, isoform, LPS, Exvivo)
+  
+# Read ESM values
+Monocyte_Isoforms=read.csv("Monocyte_Isoforms_ESM1b.csv") %>% select(isoform, evo_likelihood)
+Class=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt") %>%
+  mutate(ORF_Lentgh=nchar(ORF_seq)) %>% select(isoform, ORF_Lentgh)
+
+Monocyte_Isoforms_Length=merge(Class,Monocyte_Isoforms)
+
+# Merge
+PercentgeTable_ESM=merge(PercentgeTable,Monocyte_Isoforms)
+
+# Socre per functionality
+PercentgeTable_ESM_Funct=merge(PercentgeTable_ESM,Functionality[,c(1,4,5,6)])
+
+# Compute score per gene
+PercentgeTable_ESM_ScoreWeighted_Functionality=PercentgeTable_ESM_Funct %>% 
+  pivot_longer(cols = c(LPS,Exvivo), names_to = "Treatment", values_to = "IsoformUsage") %>%
+  mutate(Score=IsoformUsage*evo_likelihood) %>% group_by(Gene, Treatment, Type, Event, Usage) %>% 
+  filter(IsoformUsage != 0)
+
+PercentgeTable_ESM_ScoreWeighted_Functionality[PercentgeTable_ESM_ScoreWeighted_Functionality$Type == "50% more" & PercentgeTable_ESM_ScoreWeighted_Functionality$Usage == "More in LPS","Type"]="50% more\ninLPS"
+PercentgeTable_ESM_ScoreWeighted_Functionality[PercentgeTable_ESM_ScoreWeighted_Functionality$Type != "50% more\ninLPS","Type"]="Remains"
+
+PercentgeTable_ESM_ScoreWeighted_Functionality=PercentgeTable_ESM_ScoreWeighted_Functionality[PercentgeTable_ESM_ScoreWeighted_Functionality$Event %in% c("Ensembl_canonical", "Functionality", "Productivity"),]
+
+PercentgeTable_ESM_ScoreWeighted_Functionality$Event=factor(PercentgeTable_ESM_ScoreWeighted_Functionality$Event, levels = c("Functionality", "Productivity","Ensembl_canonical"))
+
+PercentgeTable_ESM_ScoreWeighted_Functionality$Treatment=factor(PercentgeTable_ESM_ScoreWeighted_Functionality$Treatment, levels = c("Exvivo", "LPS"))
+  
+PLMScore=ggboxplot(PercentgeTable_ESM_ScoreWeighted_Functionality, x = "Treatment", y = "Score", id = "isoform", color = "Treatment", short.panel.labs = FALSE, facet.by = c("Type","Event")) + scale_color_manual(values = c("Exvivo" = "#6F99ADFF", "LPS" = "#BC3C29FF")) + 
+  stat_compare_means(comparisons = list(c("Exvivo","LPS")), method = "wilcox.test", paired = F)
+
+SavePPT(PPT, PLMScore, "LPS_PLM.pdf", 4, 5)
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+
+# prepare the percentatges of funcitonal isoforms
+PercentgeTable=Monocyte_Isoforms_quantified %>%
+    filter(rowSums(select(., contains("batch"))) > MinimReads) %>%
+    group_by(Gene) %>%
+    mutate(across(colnames(Monocyte_Isoforms_quantified)[-c(1,8,9)],
+                  proportions, .names="{.col}_perc")) %>%
+    ungroup(.) %>% mutate(across(everything(), ~replace_na(. , 0))) %>% ungroup(.) %>%
+    mutate(LPS=rowMeans(select(., intersect(contains("LPS"), contains("_perc"))))) %>%
+    mutate(Exvivo=rowMeans(select(., intersect(contains("exVivo"), contains("_perc"))))) %>%
+    select(ids, Gene, LPS, Exvivo, isoform) %>%
+    pivot_longer(cols = c(LPS, Exvivo), names_to = "Treatment") %>% 
+    group_by(Gene, Treatment) %>% 
+    filter(value == max(value)) %>% ungroup() %>%
+    group_by(Gene) %>%
+    filter(all(c("LPS", "Exvivo") %in% Treatment)) %>% 
+    filter(all(value[Treatment == "LPS"] != 0, value[Treatment == "Exvivo"] != 0)) %>%
+  ungroup()
+
+# Read ESM values
+Monocyte_Isoforms=read.csv("Monocyte_Isoforms_ESM1b.csv") %>% select(isoform, evo_likelihood)
+PercentgeTable_ESM=data.frame(merge(PercentgeTable, Monocyte_Isoforms, by="isoform"))%>%
+  filter(!is.na(evo_likelihood)) %>% group_by(Gene) %>%
+  filter(all(c("LPS", "Exvivo") %in% Treatment)) %>% 
+  select(Gene, isoform, Treatment, value, evo_likelihood) %>% group_by(Gene) %>%
+  filter(n_distinct(isoform[Treatment == "Exvivo"]) == 1,
+         n_distinct(isoform[Treatment == "LPS"]) == 1,
+         isoform[Treatment == "Exvivo"][1] != isoform[Treatment == "LPS"][1])
+
+PercentgeTable_ESM$Treatment=factor(paste0("Isoform most used in " ,
+                                           PercentgeTable_ESM$Treatment),
+                                    levels = c("Isoform most used in Exvivo", 
+                                               "Isoform most used in LPS"))
+# Evo of most used isoforms
+PLMScore=ggpaired(PercentgeTable_ESM, x = "Treatment", y = "evo_likelihood", 
+                  id = "Gene", color = "Treatment", line.color = "gray", line.size = 0.1,
+                  short.panel.labs = FALSE) + 
+  scale_color_manual(values = c("Isoform most used in Exvivo" = "#6F99ADFF", 
+                                "Isoform most used in LPS" = "#BC3C29FF")) + 
+  stat_compare_means(comparisons = list(c("Isoform most used in Exvivo",
+                                          "Isoform most used in LPS")), 
+                     method = "wilcox.test", paired = T)
+PLMScore
+SavePPT(PPT, PLMScore, "DiffMostUsedPLM.pdf", 4, 5)
+
+```
+
+```{r, echo=FALSE, message=F, warning=F}
+
+colnames(Monocyte_Isoforms)=c("isoform_id", "evo_likelihood")
+
+# Translated isoforms in functional, productive, novel, ensmbl canonical
+FuncProd_PLM=merge(data.table(FunctMaxORF[,c(2,3)],
+                                Type="Functionality"), Monocyte_Isoforms,
+                     by="isoform_id")
+FuncProd_PLM=rbind(FuncProd_PLM,
+                     merge(data.table(Productivity, Type="Productivity"),
+                           Monocyte_Isoforms,
+                     by="isoform_id"))
+
+FuncProd_PLM=rbind(FuncProd_PLM,
+                     merge(data.table(Annotation, Type="Novel"),
+                           Monocyte_Isoforms,
+                     by="isoform_id"))
+
+FuncProd_PLM=rbind(FuncProd_PLM,
+                     merge(data.table(EnsmblCanonical, Type="EnsmblCanonical"),
+                           Monocyte_Isoforms,
+                     by="isoform_id"))
+
+FuncProd_PLM=rbind(FuncProd_PLM,
+                     merge(data.table(NumberOfDomains[,c(1,5)], Type="MostProteinDomains"),
+                           Monocyte_Isoforms,
+                     by="isoform_id"))
+
+FuncProd_PLM=rbind(FuncProd_PLM,
+                     merge(data.table(Monocyte_Isoforms_quantified_Functionality[,c(1,10)], Type="Translated"),
+                           Monocyte_Isoforms,
+                     by="isoform_id"))
+
+Colors=c("#BC3C29FF","#0072B5FF","#E18727FF","#20854EFF",
+         "#6F99ADFF","#7876B1FF","#EE4C97FF","#FFDC91FF", "#6F99ADFF","#0072B5FF", "#E18727FF","#FFDC91FF")
+
+FuncProd_PLM[FuncProd_PLM$functionality %in% c("NGO","PTC","NST"),"functionality"]="non-productive"
+FuncProd_PLM$functionality=factor(FuncProd_PLM$functionality,
+                                  levels = c("functional","productive","Ensembl_canonical","novel", "More_domains", "Trasnlated",
+                                                   "non-functional","annotated","others", "Less_domains", "not translated",
+                                                   "non-productive"))
+i=1
+Plots=list()
+for(OneType in unique(FuncProd_PLM$Type)){
+  
+  my_comparisons=list(c(as.character(unique(FuncProd_PLM[FuncProd_PLM$Type == OneType,]$functionality)[1]),
+                          as.character(unique(FuncProd_PLM[FuncProd_PLM$Type == OneType,]$functionality)[2])))
+
+  Plots[[OneType]]=ggbarplot(FuncProd_PLM[FuncProd_PLM$Type == OneType,], 
+            x = "functionality", y = "evo_likelihood", id = "isoform_id", 
+            fill = "functionality", line.color = "gray", line.size = 0.1, 
+            short.panel.labs = FALSE, facet.by = "Type", add = "mean_ci") + 
+    ylab("Mean pseudolikelihood") +
+    stat_compare_means(comparisons = my_comparisons, method = "t.test") +
+    scale_fill_manual(values = Colors[i:(i+length(unique(FuncProd_PLM[FuncProd_PLM$Type == OneType,]$functionality)))]) + theme(axis.title.x = element_blank(), legend.position = "none")
+  
+  i=i+length(unique(FuncProd_PLM[FuncProd_PLM$Type == OneType,]$functionality))
+  SavePPT(PPT, Plots[[OneType]], paste0(OneType,"_EvoLike.pdf"), 2, 4)
+}
+
+Plots
+
+print(PPT, target = "Fig4/Figure4.pptx")
+
+```
+
+# Fig. 5. NLRP3
+
+## Isoform Usage
+
+```{r, echo=FALSE, message=F, warning=F}
+
+library(IsoformSwitchAnalyzeR)
+
+# get the experimental design myDesign <-
+myDesign <- fread("ReferenceGenome/metadata/reads_manifestFile.txt",header = FALSE) %>%
+  dplyr::select(c(V1,V2,V3)) %>% plyr::rename(c(V1="sampleID",V2="condition", V3="batch")) %>%
+  mutate(sampleID = paste(sampleID, "_salmon_quant", sep = "")) %>% 
+  mutate(condition=sub("3h","", condition))
+
+myDesign$condition=sub("CD14sexVivo","aSteady.state", myDesign$condition)
+myDesign$condition=sub("CD14sLPS","LPS", myDesign$condition)
+
+### Import Salmon example data in R package
+salmonQuant <- importIsoformExpression(
+    parentDir = "Salmon_Quantification_ONT",
+    pattern = paste(unique(myDesign$sampleID),collapse ="|"),
+    addIsofomIdAsColumn = TRUE
+)
+colnames(salmonQuant$counts)=c("ids",paste(myDesign[match(colnames(salmonQuant$counts)[-1], myDesign$sampleID),]$batch, myDesign[match(colnames(salmonQuant$counts)[-1], myDesign$sampleID),]$condition, sep = "_"))
+
+NLRP3=salmonQuant$counts %>%
+  filter(ids %in% Monocyte_Isoforms_quantified[grep("NLRP3",Monocyte_Isoforms_quantified$ids),]$isoform) %>% 
+  pivot_longer(cols = -ids) %>%
+  mutate(patient=sub("batch","HC",name)) %>%
+  group_by(patient) %>%
+  mutate(percentage = value / sum(value)) %>%
+  ungroup()
+
+NLRP3$ids=factor(NLRP3$ids,
+                 levels = rev(c("ENST00000697350.1", "b8276f1b-9f90-4171-8d54-8e106acd1d37",
+                "a4b4aa00-743a-40f2-850b-5b823cc8cdd8", "5915a690-09b0-4422-ad61-0a528c72064a",
+                "ENST00000366496.7", "0c1c943e-169e-4aa6-bb90-63ab201ad80b",
+                "c8fe74ba-1f2d-488a-8ebf-628e9bcc218d","ccd59934-d371-4161-9eee-1a1c9f4da3ab",
+                "c63b533d-1b78-43a6-9982-13c79a4b553b","46be636a-f26e-490c-82ab-6ff496968b77",
+                "4effd3b0-2351-4f95-b9e8-0af5d96a9e20")))
+
+NLRP3$patient=sub("_aSteady.state","\nEx vivo",sub("_LPS","\nLPS",NLRP3$patient))
+NLRP3$patient=factor(NLRP3$patient,
+                  levels = c("HC1\nEx vivo","HC2\nEx vivo","HC3\nEx vivo",
+                             "HC1\nLPS","HC2\nLPS","HC3\nLPS"))
+
+# Plot histogram with percentages on y-axis
+# Create the barplot
+Plot=ggplot(NLRP3, aes(x = factor(patient), y = percentage, fill = ids)) +
+  geom_bar(stat = "identity", position = "fill") +  # position = "fill" normalizes each bar to 100%
+  labs(x = "Patient", y = "Percentage", fill = "Category") +
+  scale_y_continuous(labels = scales::percent_format()) +  # Format y-axis as percentages
+  theme_minimal() +
+  geom_text(aes(label = ifelse(round(percentage,2) > 0.03, round(percentage,2), "")), 
+            position = position_fill(vjust = 0.5),
+            color = "black") +
+  scale_fill_manual(values = c("darkseagreen", "coral1","darkorange",ColorNames)) +
+  theme_minimal() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+          axis.title.y=element_blank())
+Plot
+SavePPT(PPT, Plot, "NLRP3_Usage_Salmon.pdf", 6, 4)
+
+```
+
+## Functionality
+
+```{r, echo=FALSE, message=F, warning=F}
+
+library(IsoformSwitchAnalyzeR)
+colnames(FunctMaxORF)=c("gene_id","ids","functionality")
+NLRP3_Funct=merge(NLRP3, FunctMaxORF, all.x=T)
+
+NLRP3_Funct_Final=NLRP3_Funct %>% group_by(name, patient, functionality) %>%
+  summarise(percentage=sum(percentage))
+
+NLRP3_Funct_Final$patiend_id=sub("\n.*","",NLRP3_Funct_Final$patient)
+NLRP3_Funct_Final$Treatment=factor(sub(".*\n","",NLRP3_Funct_Final$patient),
+                                   levels=c("Ex vivo","LPS"))
+
+# Plot histogram with percentages on y-axis
+# Create the barplot
+Bar_Functionality=ggbarplot(NLRP3_Funct_Final[NLRP3_Funct_Final$functionality == "functional",], x = "Treatment", y = "percentage", 
+                            ylab= "Percentage", xlab = "Treatment", color = "Treatment", fill = "Treatment", id = "patiend_id",
+               add = c("mean_se", "point"), 
+               palette = c("Ex vivo" = "#6F99ADFF", "LPS" = "#BC3C29FF"), position = position_dodge(.8)) + 
+      scale_color_manual(values = c(LPS = "black", "Ex vivo" = "black")) + 
+  stat_compare_means(paired = F, method = "t.test", label.x=1.5, label = "p.format")
+Bar_Functionality
+
+SavePPT(PPT, Bar_Functionality, "NLRP3_BarFunctionaliy.pdf", 3,4)
+
+```
+
+## NGS validation of changes
+
+```{r isoform_switching_table, echo=F, message=T, warning=F, eval=T}
+
+NLRP3_NGSPlot <- function(PATH){
+  Data=fread(PATH)
+  Data$IR_exclusion_gene=Data$e1e2/Data$gene
+  Data$e5_gene=Data$e5/Data$gene
+  Data$e7_gene=Data$e7/Data$gene
+  Data$alt3end_gene=Data$alt3end/Data$gene
+  Data[is.na(Data)]=0
+  
+  Data_Pivot <- Data %>% 
+    pivot_longer(cols = c(colnames(Data)[-1]),
+                 values_to = "RPM",
+                 names_to = "splicing.event") %>%
+    filter(str_detect(splicing.event, "_"))
+
+  if(grepl("GSE", PATH)) {
+   # get the experimental design myDesign <-
+    myDesign <- fread("Metadata_PRJNA401766.tab.csv", header = TRUE) %>%
+      filter(disease == 'H') %>%
+      dplyr::select(c(samleName,treatment,patient)) %>%
+      plyr::rename(c(samleName="sampleID",treatment="condition", patient="batch"))
+    Data_Pivot$Sample="GSE103501"
+  } else {
+    # get the experimental design myDesign <-
+    myDesign <- fread("../../BulkRNASeq/Analysis_July2024/metadataJIArnaSeq_sex.txt",header = TRUE) %>%
+        dplyr::filter(tissue=="mono") %>% 
+        mutate(patientID=sub("exvivo","",sub("LPS","",sub("mono.*",".1",V1)))) %>%
+        dplyr::select(c(sampleName,treatment,patientID)) %>% 
+      plyr::rename(c(sampleName="sampleID",treatment="condition", patientID="batch"))
+    Data_Pivot=Data_Pivot[Data_Pivot$V1 %in% myDesign$sampleID,]
+    Data_Pivot$Sample="Ours"
+  }
+  
+  Data_Pivot$Treatment=myDesign[match(Data_Pivot$V1, myDesign$sampleID),]$condition 
+  Data_Pivot$patiend_id=myDesign[match(Data_Pivot$V1, myDesign$sampleID),]$batch
+  
+  Data_Pivot$log10_RPM=log10(Data_Pivot$RPM)
+  Data_Pivot[is.infinite(Data_Pivot$log10_RPM),"log10_RPM"]=0
+  
+  return(Data_Pivot)
+}
+
+All=rbind(NLRP3_NGSPlot("NLRP3/RPM_GSE103501_Pair.csv"),NLRP3_NGSPlot("NLRP3/RPM_Ours.csv"))
+
+Plot=list()
+for(Event in unique(All$splicing.event)){
+  library(ggpubr)
+  Plot[[Event]]=ggpaired(All[All$splicing.event == Event,], x = "Treatment", y = "RPM", id = "patiend_id", color = "Treatment", line.color = "gray", line.size = 0.2, short.panel.labs = FALSE) + 
+      facet_grid(splicing.event~Sample, scales="free") +
+      scale_color_manual(values = c("exvivo" = "#6F99ADFF", "LPS" = "#BC3C29FF")) + stat_compare_means(paired = F, method = "wilcox.test")
+}
+
+
+All$Treatment=factor(All$Treatment, levels = c("exvivo","LPS"))
+All$Sample=factor(All$Sample, levels = c("Ours","GSE103501"))
+
+Plot=list()
+for(Event in unique(All$splicing.event)){
+  library(ggpubr)
+  Plot[[Event]]=ggbarplot(All[All$splicing.event == Event,], x = "Treatment", y = "RPM", ylab= "RPM", xlab = "Treatment", color = "Treatment", fill = "Treatment", id = "patiend_id",
+               add = c("mean_se", "point"), palette = c("exvivo" = "#6F99ADFF", "LPS" = "#BC3C29FF"), position = position_dodge(.8), facet.by = c("splicing.event","Sample")) + 
+      scale_color_manual(values = c(LPS = "black", exvivo = "black")) + #stat_compare_means(paired = T, method = "t.test", label.x=1.75, label = "p.format") + 
+    stat_compare_means(paired = F, method = "t.test", label = "p.format") + xlab("")
+  #SavePPT(PPT, Plot[[Event]], paste0(Event,"_NGS_Exons.pdf"), 3, 4)
+}
+
+print(PPT, target = "Fig5/Figure5.pptx")
+
+```
+
+## qPCR validation
+
+```{r isoform_switching_table, echo=F, message=T, warning=F, eval=T}
+
+Validation=read_excel("RT_ValidationB.xlsx")
+Validation$Treatment="exvivo"
+Validation$patiend_id=sub("XV", "", sub("LPS", "",Validation$Sample))
+Validation[grep("LPS",Validation$Sample), "Treatment"]="LPS"
+
+Validation$Treatment=factor(Validation$Treatment, levels = c("exvivo","LPS"))
+
+for(Column in colnames(Validation)[!colnames(Validation) %in% c("Sample", "Treatment","patiend_id")]){
+  
+  Subset <- Validation[, c("Sample", "Treatment", "patiend_id", Column)] %>%
+    filter(.data[[Column]] != "NA") %>% mutate(!!Column := as.numeric(.data[[Column]]))
+
+  Plot=ggbarplot(Subset, x = "Treatment", y = Column, ylab= "Relative to gene expression", 
+                 xlab = "", color = "Treatment", fill = "Treatment", id = "patiend_id", 
+                 line.color = "gray", line.size = 0.2, add = c("mean_se", "point"), 
+                 palette = c("exvivo" = "#6F99ADFF", "LPS" = "#BC3C29FF"), position = position_dodge(.8)) + 
+        scale_color_manual(values = c(LPS = "black", exvivo = "black")) + stat_compare_means(paired = T, 
+                                                      method = "t.test", label.x=1.75, label = "p.format")
+  SavePPT(PPT, Plot, paste0(Column, ".pdf"), 2, 4)
+
+}
+
+```
+
+```{r isoform_switching_table, echo=F, message=T, warning=F, eval=T}
+
+print("run all")
+
+```

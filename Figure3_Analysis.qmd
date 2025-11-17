@@ -1,0 +1,1211 @@
+---
+title: "Fig3 and 4: Analysis of Isoform Switches in monocytes LPS vs exvivo"
+author: "Alejandra Bodelon"
+format: 
+  html:
+    toc: true
+    toc-location: left
+    embed-resources: true
+editor: visual
+---
+
+```{r loadpackages, echo=F, message=F, warning=F, include=F}
+
+#https://bioconductor.org/packages/devel/bioc/vignettes/IsoformSwitchAnalyzeR/inst/doc/IsoformSwitchAnalyzeR.html#ing-for-isoform-switches-via-dexseq
+
+library(ggpubr)
+library(GO.db)
+library(tidyr)
+library(ggVennDiagram)
+library(data.table)
+library(tidyverse)
+library(IsoformSwitchAnalyzeR)
+library(rtracklayer)
+library(icesTAF)
+library(dplyr)
+library(GenomicRanges)
+library(tximport)
+library(fishpond)
+library(SummarizedExperiment)
+library(ggrepel)
+library(ggsci)
+library(tximeta)
+library(biomaRt)
+library(DEXSeq)
+library(gprofiler2)
+
+library(officer)
+library(rvg)
+library(viridis)
+
+SavePPT <-function(PPT,Plot,Name, width_1, height_1){
+  ggsave(paste0("Fig3/",Name),bg="white", width = width_1, height = height_1)
+  fig_vg <- dml(ggobj = Plot)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location(width = width_1, 
+                                                             height = height_1))
+  return(PPT)
+}
+
+PPT <- read_pptx()
+
+ColorNames=pal_nejm("default")(8)
+
+# functionality prediction
+FunctMaxORF=fread("FinalIsoformAnnotation/Monocyte_Isoforms.functMaxORF.txt", header=F)
+colnames(FunctMaxORF)=c("gene_id","isoform_id","functionality")
+FunctMaxORF=FunctMaxORF[,c(2,3)]
+
+# productivity prediction
+Productivity=fread("FinalIsoformAnnotation/Monocyte_Isoforms_productivity.bed", header=F)
+Productivity=Productivity[,c(4,13)]
+Productivity$V4=sub("_.*","",Productivity$V4)
+colnames(Productivity)=c("isoform_id","functionality")
+Productivity[Productivity$functionality == "PRO","functionality"]="a. productive"
+Productivity[Productivity$functionality == "NGO","functionality"]="c. no start codon"
+Productivity[Productivity$functionality == "PTC","functionality"]="b. premature termination codon"
+Productivity[Productivity$functionality == "NST","functionality"]="d. no stop codon"
+
+```
+
+# Fig 3. Analysis of Isoform Switches in LPS vs 0h
+
+```{r functions, echo=F, message=F, warning=F}
+
+## Functions for the analysis of the data
+# Create a function to perform the DGE and DTE analysis
+DESeq2_Normalization <- function(Type, PathName, InfcolData, CompareTo, limintExp){
+  
+  # prepare the InfoCol
+  InfcolData=data.frame(InfcolData)
+  row.names(InfcolData)=InfcolData$sampleID
+
+  # change the reference
+  InfcolData$condition = relevel(factor(InfcolData$condition), ref = as.character(unique(InfcolData$condition[grep(CompareTo,InfcolData$condition)])))
+  print(paste0("New reference genome: ", CompareTo))
+  
+  # get the path of the salmon count files
+  files <- file.path(PathName,InfcolData$sampleID, "quant.sf")
+  # associate the sample names to each sample
+  names(files) <- InfcolData$sampleID
+    
+  if(Type == "DTE"){
+    # extract the counts for each isoform
+    Isoform_count <- tximport(files, type = "salmon", txOut = TRUE, countsFromAbundance = "no")
+    # extractt the counts from the matrix
+    Isoform_count <- as.data.frame(Isoform_count$counts, stringAsFactors = FALSE)
+  } else if(Type == "DGE") {
+    # open and prepare the annotation
+    Annotation = fread("FinalIsoformAnnotation/Monocyte_Isoforms.final.cds.gtf") %>% 
+      dplyr::filter(V3=="transcript") %>% mutate(transcript_id=sub('".*',"",sub('transcript_id "',"",V9))) %>%
+      mutate(gene_id=sub('\\..*',"",sub('".*',"",sub('.*gene_id "',"",V9)))) %>%
+      dplyr::select(c(transcript_id,gene_id)) %>% plyr::rename(c(gene_id="GENEID",transcript_id="TXNAME"))
+    # extract the counts for each isoform
+    Isoform_count <- tximport(files, type = "salmon", tx2gene = Annotation, countsFromAbundance = "no")
+    # extractt the counts from the matrix
+    Isoform_count <- as.data.frame(Isoform_count$counts, stringAsFactors = FALSE)
+  }
+    
+  # make sure the order is the same in count matrix and design matrix
+  print(unique(colnames(Isoform_count) == rownames(InfcolData)))
+    
+  # Create the DESeqDataSet object
+  DESeqDataSet <- DESeqDataSetFromMatrix(countData=round(Isoform_count), colData = InfcolData[,c(2,3)],
+                                design = ~ condition + batch)
+  # remove low expressed reads
+  smallestGroupSize <- min(table(InfcolData$condition)) # consider the smallest group size # consider the smallest group size
+  keep <- rowSums(counts(DESeqDataSet) >= limintExp) >= smallestGroupSize # at least 10 reads
+  DESeqDataSet_filtered <- DESeqDataSet[keep,]
+  
+  # Perform the DESeq pipeline: sequencing depth normalization between the samples, 
+  # gene - wise dispersion estimates across all samples, 
+  # fits a negative binomial GLM and applies Wald statistics to each gene
+  DESeq_RNA = DESeq(DESeqDataSet_filtered)
+  
+  # Extract the normalized expression
+  NormalizedExpression=counts(DESeq_RNA, normalized = TRUE)
+  colnames(NormalizedExpression)=paste(InfcolData$condition, InfcolData$sampleID, sep = "_")
+  NormalizedExpression=data.table(NormalizedExpression, ID=rownames(NormalizedExpression))
+    
+  return(list(DESeq_RNA, NormalizedExpression))
+}
+
+# Create a function to perform the DGE and DTE analysis
+DESeq2_DGE_DTE <- function(Type, PathName, InfcolData, CompareTo){
+    
+  if(grepl("ONT", PathName)){
+    # Expression
+    limintExp=3
+  } else {
+    # Expression
+    limintExp=10
+  }
+  
+  # Run the normalization step
+  DESeq_RNA=DESeq2_Normalization(Type, PathName, InfcolData, CompareTo, limintExp)[[1]]
+  
+  # get the possible comparisons
+  PossibleComp=resultsNames(DESeq_RNA) # Lists the coefficients (check if relevel works okay)
+  print(PossibleComp)
+  
+  # Detect the comparison to do
+  Comparison=paste0("condition_", unique(InfcolData$condition)[-grep(CompareTo, unique(InfcolData$condition))], "_vs_", CompareTo)
+  ComparisonToCompare=PossibleComp[grep(Comparison,PossibleComp)]
+  print(ComparisonToCompare)
+
+  # Get the result of the comparion with an alpha of 0.05 as a cut-off
+  Result = results(DESeq_RNA, name=ComparisonToCompare, alpha = 0.05)
+
+  # Get the shrinkaged Log fold change
+  LfcShrink = lfcShrink(DESeq_RNA, coef=ComparisonToCompare, type="apeglm") # the apeglm new method was used
+
+  # Create the data.table
+  DataFramePadj=data.frame(Result) 
+  DataFrameLfcShrink=data.frame(LfcShrink) # Create the data.table
+  
+  # Add gene names in the data.table
+  DataFramePadj$Name=rownames(DataFramePadj) 
+  DataFrameLfcShrink$Name=rownames(DataFrameLfcShrink)
+  
+  # Merge p-adjusted p-values from results to the shrinkaged log2FC
+  DataFrame=merge(DataFrameLfcShrink[,c(2,6)],DataFramePadj[,c(5,6,7)])
+
+  # Save the results into a file
+  write.table(DataFrame, file=paste0(Type,"_DESeq2/", paste0(sub("condition",Type,ComparisonToCompare),".txt")), sep = "\t",quote = F, row.names = F)
+    
+  return(DataFrame)
+}
+
+# Create a function to perform the IsoformSwitching analysis
+IsoformSwitcing<-function(Type, myDesign, PathName){
+  
+  ### Import Salmon example data in R package
+  salmonQuant <- importIsoformExpression(
+      parentDir = PathName,
+      pattern = paste(unique(myDesign$sampleID),collapse ="|"),
+      addIsofomIdAsColumn = TRUE
+  )
+  # reorder
+  myDesign=myDesign[match(myDesign$sampleID,colnames(salmonQuant$counts)[-1]),]
+  # check that the design matrix and the description are the same order
+  print(unique(colnames(salmonQuant$counts)[-1] == myDesign$sampleID))
+  print(unique(colnames(salmonQuant$abundance)[-1] == myDesign$sampleID))
+  
+  # add data
+  aSwitchList <- importRdata(
+      isoformCountMatrix   = salmonQuant$counts,
+      isoformRepExpression = salmonQuant$abundance,
+      designMatrix         = myDesign,
+      isoformExonAnnoation = "FinalIsoformAnnotation/Monocyte_Isoforms.final.cds.gtf",
+      isoformNtFasta       = "FinalIsoformAnnotation/Monocyte_Isoforms.final.fasta",
+      fixStringTieAnnotationProblem = TRUE,
+      showProgress = TRUE,
+      addAnnotatedORFs=TRUE
+  )
+  
+  # summary of the analysis
+  print(aSwitchList$designMatrix)
+  print(summary(aSwitchList))
+  
+  # Pre-filtering with default parameters, which includes
+  # geneExpressionCutoff = 1, isoformExpressionCutoff = 0,
+  # IFcutoff=0, removeSingleIsoformGenes = TRUE, alpha=0.05, dIFcutoff = 0.1 (10%)
+  aSwitchListFiltered <- preFilter(switchAnalyzeRlist = aSwitchList)
+  
+  # Isoform switching analysis by isoformSwitchTestDEXSeq with default
+  # alpha = 0.05, dIFcutoff = 0.1 (10%)
+  # reduceToSwitchingGenes: When TRUE this argument will cause the function to reduce/subset the switchAnalyzeRlist to the genes which each contains at least one differential used isoform, as indicated by the alpha and dIFcutoff cutoffs. 
+  aSwitchListFiltered_Analyzed <- isoformSwitchTestDEXSeq(
+      switchAnalyzeRlist = aSwitchListFiltered,
+      reduceToSwitchingGenes = F
+  )
+  
+  # Save the results into a file
+  write.table(aSwitchListFiltered_Analyzed$isoformFeatures, file=paste0("DTE_DESeq2/IsoformSwitching_",Type,"LPS_vs_Exvivo.txt"), sep = "\t",quote = F, row.names = F)
+  
+  return(aSwitchListFiltered_Analyzed)
+}
+
+# Lists to store the outputs
+IsoformSwitching=list()
+DGE=list()
+DTE=list()
+Norm=list()
+
+```
+
+## 1. Nanopore data - Monocytes
+
+### a. Differential gene expression
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+# get the experimental design myDesign <-
+myDesign <- fread("ReferenceGenome/metadata/reads_manifestFile.txt",header = FALSE) %>%
+  dplyr::select(c(V1,V2,V3)) %>% plyr::rename(c(V1="sampleID",V2="condition", V3="batch")) %>%
+  mutate(sampleID = paste(sampleID, "_salmon_quant", sep = "")) %>% 
+  mutate(condition=sub("3h","", condition))
+
+myDesign$condition=sub("CD14sexVivo","aSteady.state", myDesign$condition)
+myDesign$condition=sub("CD14sLPS","LPS", myDesign$condition)
+
+# Run DGE in ONT data
+DGE[["ONT"]]=DESeq2_DGE_DTE("DGE","Salmon_Quantification_ONT",myDesign,"aSteady.state")
+
+Norm[["ONT"]][["Gene"]]=DESeq2_Normalization("DGE","Salmon_Quantification_ONT",myDesign,"aSteady.state", 3)[[2]]
+  
+```
+
+### b. Differential transcript expression
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+# Run DTE in ONT data
+DTE[["ONT"]]=DESeq2_DGE_DTE("DTE","Salmon_Quantification_ONT",myDesign,"aSteady.state")
+
+Norm[["ONT"]][["Transcript"]]=DESeq2_Normalization("DTE","Salmon_Quantification_ONT",myDesign,"aSteady.state", 3)[[2]]
+
+```
+
+### c. Isoform switcing
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+IsoformSwitching[["ONT"]]=IsoformSwitcing("ONT",myDesign, "Salmon_Quantification_ONT")
+extractSwitchSummary(IsoformSwitching[["ONT"]])
+
+# Write the aa sequence
+IsoformSwitching[["ONT"]] <- extractSequence(IsoformSwitching[["ONT"]],
+    outputPrefix='ONT_IsoformSwitchAnalyzeR_isoform_significant')
+
+```
+
+## 2. Bulk-RNASeq data: In vitro activation of Monocytes - our data
+
+### a. Differential gene expression
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+# get the experimental design myDesign <-
+myDesign <- fread("../../BulkRNASeq/Analysis_July2024/metadataJIArnaSeq_sex.txt",header = TRUE) %>%
+    dplyr::filter(tissue=="mono") %>% dplyr::filter(disease=="healthy") %>% 
+    mutate(patientID=sub("exvivo","",sub("LPS","",sub("mono.*",".1",V1)))) %>%
+  dplyr::select(c(sampleName,treatment,patientID)) %>% plyr::rename(c(sampleName="sampleID",treatment="condition", patientID="batch")) %>%
+  mutate(sampleID=paste0(sampleID,"_salmon"))
+
+
+# Run DGE in ONT data
+DGE[["InVitro_RNASeq_Ours"]]=DESeq2_DGE_DTE("DGE","Salmon_Realign_Quant",myDesign,"exvivo")
+
+Norm[["InVitro_RNASeq_Ours"]][["Gene"]]=DESeq2_Normalization("DGE","Salmon_Realign_Quant",myDesign,"exvivo", 10)[[2]]
+
+```
+
+### b. Differential transcript expression
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+# Run DTE in ONT data
+DTE[["InVitro_RNASeq_Ours"]]=DESeq2_DGE_DTE("DTE","Salmon_Realign_Quant",myDesign,"exvivo")
+
+Norm[["InVitro_RNASeq_Ours"]][["Transcript"]]=DESeq2_Normalization("DTE","Salmon_Realign_Quant",myDesign,"exvivo", 10)[[2]]
+
+```
+
+### c. Isoform switcing
+
+```{r countmatrix_design1_bulkb, echo=F, message=F, warning=F}
+
+IsoformSwitching[["InVitro_RNASeq_Ours"]]=IsoformSwitcing("InVitro_RNASeq_Ours",myDesign, "Salmon_Realign_Quant")
+extractSwitchSummary(IsoformSwitching[["InVitro_RNASeq_Ours"]])
+
+# Write the aa sequence
+IsoformSwitching[["InVitro_RNASeq_Ours"]] <- extractSequence(IsoformSwitching[["InVitro_RNASeq_Ours"]],
+    outputPrefix='InVitro_RNASeq_Ours_IsoformSwitchAnalyzeR_isoform_significant')
+
+```
+
+## 3. Bulk-RNASeq data: In vitro published data - Study: GSE103501
+
+Cepika AM, Banchereau R, Segura E, Ohouo M, Cantarel B, Goller K, Cantrell V, Ruchaud E, Gatewood E, Nguyen P, Gu J, Anguiano E, Zurawski S, Baisch JM, Punaro M, Baldwin N, Obermoser G, Palucka K, Banchereau J, Amigorena S, Pascual V. A multidimensional blood stimulation assay reveals immune alterations underlying systemic juvenile idiopathic arthritis. J Exp Med. 2017 Nov 6;214(11):3449-3466. doi: 10.1084/jem.20170412. Epub 2017 Sep 21. PMID: 28935693; PMCID: PMC5679164.
+
+### a. Differential gene expression
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+# get the experimental design myDesign <-
+myDesign <- fread("Metadata_PRJNA401766.tab.csv", header = TRUE) %>%
+  filter(disease == 'H') %>%
+  dplyr::select(c(samleName,treatment,patient)) %>%
+  plyr::rename(c(samleName="sampleID", treatment="condition", patient="batch")) %>% 
+  mutate(sampleID=paste0(sampleID,"_salmon"))
+
+# Run DGE in ONT data
+DGE[["InVitro_RNASeq_Published"]]=DESeq2_DGE_DTE("DGE","Salmon_Realign_Quant_2811_sJIA/",myDesign,"exvivo")
+
+Norm[["InVitro_RNASeq_Published"]][["Gene"]]=DESeq2_Normalization("DGE","Salmon_Realign_Quant_2811_sJIA/",myDesign,"exvivo", 10)[[2]]
+
+```
+
+### b. Differential transcript expression
+
+```{r countmatrix_design1_nanopore, echo=F, message=F, warning=F}
+
+# Run DTE in ONT data
+DTE[["InVitro_RNASeq_Published"]]=DESeq2_DGE_DTE("DTE","Salmon_Realign_Quant_2811_sJIA/",myDesign,"exvivo")
+
+Norm[["InVitro_RNASeq_Published"]][["Transcript"]]=DESeq2_Normalization("DTE","Salmon_Realign_Quant_2811_sJIA/",myDesign,"exvivo", 10)[[2]]
+
+```
+
+### c. Isoform switcing
+
+```{r countmatrix_design1_bulkb, echo=F, message=F, warning=F}
+
+IsoformSwitching[["InVitro_RNASeq_Published"]]=IsoformSwitcing("InVitro_RNASeq_Published",myDesign, "Salmon_Realign_Quant_2811_sJIA/")
+extractSwitchSummary(IsoformSwitching[["InVitro_RNASeq_Published"]])
+
+# Write the aa sequence
+IsoformSwitching[["InVitro_RNASeq_Published"]] <- extractSequence(IsoformSwitching[["InVitro_RNASeq_Published"]],
+    outputPrefix='InVitro_RNASeq_Published_IsoformSwitchAnalyzeR_isoform_significant')
+
+```
+
+# Analysis of the results
+
+### 1. Correlation of of gene and transcript expression between long-read and short-read sequencing
+
+```{r, echo=FALSE, warning=F, eval=T}
+#| label: fig-2B.2e
+#| fig-cap: "Long-read and short-read correlation"
+#| fig-subcap: 
+#|   - "Our RNA-Seq"
+#|   - "GSE103501"
+#| layout-ncol: 2
+
+Final=data.table()
+for(Type in names(Norm[["ONT"]])){
+  Summary_Ont <- Norm[["ONT"]][[Type]] %>%
+    rowwise() %>%
+    mutate(
+      ONT_LPS_mean = mean(c_across(contains("LPS"))),
+      ONT_Steady_mean = mean(c_across(matches("aSteady")))
+    ) %>%
+    ungroup() %>%
+    dplyr::select(ID, ONT_LPS_mean, ONT_Steady_mean) %>%
+    tidyr::pivot_longer(cols = c(ONT_LPS_mean, ONT_Steady_mean), names_to = "Condition", values_to = "Ont_Mean") %>%
+    mutate(Condition = if_else(str_detect(Condition, "Steady"), "exvivo", "LPS")) %>%
+    mutate(AnalysisType=Type)
+  
+  for(ShortReads in names(Norm)[2:3]){
+    Summary_Short <- Norm[[ShortReads]][[Type]] %>%
+      rowwise() %>%
+      mutate(
+        Short_LPS_mean = mean(c_across(contains("LPS"))),
+        Short_Steady_mean = mean(c_across(matches("exvivo")))
+      ) %>%
+      ungroup() %>%
+      dplyr::select(ID, Short_LPS_mean, Short_Steady_mean) %>%
+      tidyr::pivot_longer(cols = c(Short_LPS_mean, Short_Steady_mean), names_to = "Condition", values_to = "ShortRead_Mean") %>%
+      mutate(Condition = if_else(str_detect(Condition, "Steady"), "exvivo", "LPS")) %>%
+      mutate(AnalysisType=Type)
+    
+    Final=rbind(Final, 
+                data.table(merge(Summary_Ont, Summary_Short, by=c("ID", "Condition", "AnalysisType")), Type=ShortReads))
+  }
+}
+
+# Calculate stats by group
+stats <- Final %>%
+  group_by(Condition, Type, AnalysisType) %>%
+  do({
+    test <- cor.test(.$Ont_Mean, .$ShortRead_Mean, method = "spearman")
+    tidy_test <- broom::tidy(test)
+    data.frame(
+      estimate = tidy_test$estimate,  # Spearman's rho
+      p_value = tidy_test$p.value
+    )
+  }) %>% mutate(p_value_sif=ifelse(p_value < 0.01, "***", ""))
+
+
+Correlation <- ggplot(Final[Final$Type == "InVitro_RNASeq_Ours",], aes(x = log2(Ont_Mean+1), y = log2(ShortRead_Mean+1))) +
+    geom_bin2d(binwidth = c(0.25, 0.25)) +
+    scale_fill_viridis_c(option = "D") +
+    theme_bw() + facet_grid(AnalysisType ~ Condition) +
+    geom_text(data = stats[stats$Type == "InVitro_RNASeq_Ours",], 
+              aes(x = 5, y = 17.5, label = paste0("Spearman's Correlation:\n", 
+                                                round(estimate,3), p_value_sif)), 
+              inherit.aes = FALSE, size = 2) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.5,
+                linetype = "dashed") +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"),
+          legend.position="top")
+Correlation
+SavePPT(PPT, Correlation, "OursCorrelation.pdf", 4, 3)
+
+Correlation <- ggplot(Final[Final$Type == "InVitro_RNASeq_Published",], aes(x = log2(Ont_Mean+1), y = log2(ShortRead_Mean+1))) +
+    geom_bin2d(binwidth = c(0.25, 0.25)) +
+    scale_fill_viridis_c(option = "D") +
+    theme_bw() + facet_grid(AnalysisType ~ Condition) +
+    geom_text(data = stats[stats$Type == "InVitro_RNASeq_Published",], 
+              aes(x = 5, y = 17.5, label = paste0("Spearman's Correlation:\n", 
+                                                round(estimate,3), p_value_sif)), 
+              inherit.aes = FALSE, size = 2) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.5,
+                linetype = "dashed") +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"),
+          legend.position="top")
+Correlation
+SavePPT(PPT, Correlation, "GSE103501Correlation.pdf", 4, 3)
+
+```
+
+### 2. Isoform expression in LPS and 0h
+
+```{r, echo=FALSE, warning=F, eval=T}
+#| label: fig-2B.2e
+#| fig-cap: "Isoform expression"
+#| fig-subcap: 
+#|   - "Isoforms expressed at least 3 reads in a condition (mean of replicates)"
+#|   - "Novel Isoforms expressed at least 3 reads in a condition (mean of replicates)"
+#| layout-ncol: 2
+
+# Minimum of expression for each "type"
+MinimReads=3
+  
+# Read expression
+Monocyte_Isoforms_quantified=fread("FinalIsoformAnnotation/Monocyte_Isoforms_quantified.tpm.tsv", header=T)
+
+colnames(Monocyte_Isoforms_quantified)=sub("CD14sexVivo","aSteadystate", colnames(Monocyte_Isoforms_quantified))
+colnames(Monocyte_Isoforms_quantified)=sub("CD14sLPS","LPS", colnames(Monocyte_Isoforms_quantified))
+
+# mean per sample
+Monocyte_Isoforms_quantified=Monocyte_Isoforms_quantified %>%
+  group_by(ids) %>%
+  mutate(LPS = rowMeans(across(contains("LPS")), na.rm = TRUE)) %>%
+  mutate(aSteadystate = rowMeans(across(contains("aSteadystate")), na.rm = TRUE)) %>%
+  ungroup() %>%  # Ungroup before selecting columns
+  dplyr::select(ids, LPS, aSteadystate) %>% 
+  pivot_longer(cols = c("LPS","aSteadystate"), 
+               names_to = "Treatment", 
+               values_to = "MeanReads") %>%
+  filter(MeanReads > 3) %>% dplyr::select(ids, Treatment)
+
+# join all information
+GeneOverlap=list('Steady state'=Monocyte_Isoforms_quantified[Monocyte_Isoforms_quantified$Treatment == "aSteadystate",]$ids,
+                 'LPS'=Monocyte_Isoforms_quantified[Monocyte_Isoforms_quantified$Treatment == "LPS",]$ids)
+
+library(ggvenn)
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, fill_color = c(ColorNames[6],ColorNames[1]), fill_alpha = 0.8, 
+       stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+SavePPT(PPT, Genes, "ExpressedConditionAll.pdf", 4, 10)
+
+```
+
+### 3. Scatter plots
+
+Gene expression increases isoform-specifically after monocyte activation:
+
+```{r validated, echo=FALSE, message=F, warning=F}
+#| label: fig-validated
+#| fig-cap: "Nanopore - LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Nanopore - DGE vs DTE"
+#| layout-ncol: 1
+
+SelectedGenes=c("PPP2R2D","PTX3")
+SelectedTranscrits =c("c8fe74ba-1f2d-488a-8ebf-628e9bcc218d", "ENST00000697350.1", "ENST00000366496.7","b8276f1b-9f90-4171-8d54-8e106acd1d37", "a4b4aa00-743a-40f2-850b-5b823cc8cdd8")
+
+
+PlotValidatedChanges <-function(DGE_1, DTE_1, SelectedGenes, SelectedTranscrits){
+  Plot=list()
+  # change colnames
+  colnames(DGE_1)=c("gene_id","log2FoldChange_gene","padj_gene")
+  colnames(DTE_1)=c("transcript_id","log2FoldChange_transcript","padj_transcript")
+  # load the annotation
+  Annotation = fread("FinalIsoformAnnotation/Monocyte_Isoforms.final.cds.gtf") %>% 
+      dplyr::filter(V3=="transcript") %>% mutate(transcript_id=sub('".*',"",sub('transcript_id "',"",V9))) %>%
+      mutate(gene_id=sub('\\..*',"",sub('".*',"",sub('.*gene_id "',"",V9)))) %>%
+      mutate(gene_name=sub('\\..*',"",sub('".*',"",sub('.*gene_name "',"",V9)))) %>%
+      dplyr::select(c(transcript_id,gene_id,gene_name)) %>% mutate(gene_name=sub("transcript_id","",gene_name))
+  FinalTable=merge(DTE_1, Annotation, all.x=T)
+  FinalTable=merge(FinalTable, DGE_1, all.x=T)
+  
+  FinalTable$Color="not significant"
+  FinalTable[abs(FinalTable$log2FoldChange_transcript) > 1,"Color"]="DTE"
+  FinalTable[abs(FinalTable$log2FoldChange_gene) > 1,"Color"]="DGE"
+  FinalTable[FinalTable$log2FoldChange_transcript > 1 & FinalTable$log2FoldChange_gene > 1,"Color"]="overexpressed (DTE and DGE)"
+  FinalTable[FinalTable$log2FoldChange_transcript < -1 & FinalTable$log2FoldChange_gene < -1,"Color"]="underexpressed (DTE and DGE)"
+  
+  FinalTable$Genelabels=""
+  FinalTable=FinalTable[order(abs(FinalTable$log2FoldChange_transcript), decreasing = T),]
+  #FinalTable[,"Genelabels"]=paste(FinalTable$gene_name, FinalTable$transcript_id, sep="\n")
+  FinalTable[,"Genelabels"]=paste(FinalTable$gene_name, "", sep="\n")
+  
+  FinalTable$Names=""
+  FinalTable[FinalTable$gene_name %in% SelectedGenes,"Names"]=FinalTable[FinalTable$gene_name %in% SelectedGenes,]$Genelabels
+  FinalTable[FinalTable$transcript_id %in% SelectedTranscrits,"Names"]=FinalTable[FinalTable$transcript_id %in% SelectedTranscrits,]$Genelabels
+  
+  Plot[[1]]=ggplot(data=FinalTable, aes(x=log2FoldChange_gene, y=log2FoldChange_transcript, label=Names, color=Color)) + 
+    geom_point(size=0.5) + 
+    geom_point(data = ~ subset(., Color != "not significant"), size=0.5) + 
+    geom_hline(yintercept = c(-1,1), linetype='dashed',colour = "red") + # default cutoff
+    geom_vline(xintercept = c(-1,1), linetype='dashed',colour = "red") + # default cutoff
+    scale_color_manual('Signficant\nExpression', values = c(ColorNames[2],ColorNames[4],'grey65',ColorNames[1],ColorNames[6])) +
+    labs(x='log2FC gene', y='log2FC transcript') +
+    geom_text_repel(size=2, color="black", max.overlaps = Inf) +
+    geom_abline(slope=1, intercept=0, color="black", linetype="dashed") +
+    theme_bw() +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"),
+          legend.position="top")
+  
+  print(paste0("Mean log2FC for gene: ",mean(unique(FinalTable[,c(1,6)])$log2FoldChange_gene), " and mean log2FC for isoforms: ", mean(FinalTable$log2FoldChange_transcript)))
+  
+  return(Plot)
+}
+
+Plot=PlotValidatedChanges(DGE[["ONT"]][,c(1,2,4)], DTE[["ONT"]][,c(1,2,4)], SelectedGenes, SelectedTranscrits)
+Plot
+SavePPT(PPT, Plot[[1]], "DGE_DTE.pdf", 3.6, 2.75)
+
+```
+
+### 3. Differential isoform switching
+
+```{r validated, echo=FALSE, message=F, warning=F}
+#| label: fig-validated
+#| fig-cap: "Nanopore - LPS vs exvivo"
+#| fig-subcap: 
+#|   - "Nanopore isoform switching"
+#| layout-ncol: 1
+
+SelectedTranscrits =c("3437212e-3521-47ca-9918-ef0ebb3fe0d2", "ENST00000378198.9", "ENST00000480495.1", "ENST00000373042.5", "ENST00000468084.1", "3bbe89a6-aed5-4499-ab56-c430685b6577", "5ef65bdd-f808-40ee-aba7-9d5ddbfd4dad", "643d5118-e344-4bc8-9780-1788d5934728", "ENST00000455566.6")
+
+PlotValidatedChanges <-function(IsoformSwitching, Select){
+  Plot=list()
+  IsoformSwitching=IsoformSwitching[!is.na(IsoformSwitching$isoform_switch_q_value),]
+  IsoformSwitching$Color=""
+  IsoformSwitching[IsoformSwitching$dIF > 0,"Color"]="dIF > 0.1 and q < 0.05"
+  IsoformSwitching[IsoformSwitching$dIF < 0,"Color"]="dIF < -0.1 and q < 0.05"
+  IsoformSwitching[abs(IsoformSwitching$dIF) < 0.1,"Color"]="not significant"
+  IsoformSwitching[IsoformSwitching$isoform_switch_q_value >= 0.05,"Color"]="not significant"
+  IsoformSwitching[abs(IsoformSwitching$gene_log2_fold_change) > 1 &
+                     IsoformSwitching$Color != "not significant","Color"]=
+    paste(IsoformSwitching[abs(IsoformSwitching$gene_log2_fold_change) > 1 &IsoformSwitching$Color != "not significant",]$Color, " and DEG")
+  IsoformSwitching$Genelabels=""
+  IsoformSwitching=IsoformSwitching[order(abs(IsoformSwitching$dIF), decreasing = T),]
+
+  IsoformSwitching[,"Genelabels"]=paste(IsoformSwitching$gene_name,
+                                        "",sep="\n")
+  IsoformSwitching[,"Genelabels"]=paste(IsoformSwitching$gene_name,
+                                        IsoformSwitching$isoform_id,sep="\n")
+  IsoformSwitching$Names=""
+  IsoformSwitching[IsoformSwitching$isoform_id %in% Select,"Names"]=IsoformSwitching[IsoformSwitching$isoform_id %in% Select,]$Genelabels
+  IsoformSwitching[IsoformSwitching$Color == "not significant","Names"]=""
+
+  Plot[[1]]=ggplot(data=IsoformSwitching, aes(x=gene_log2_fold_change, y=dIF, label=Names, color=Color)) +
+    geom_point(size=0.5) + 
+    geom_point(data = ~ subset(., Color != "not significant"), size=0.5) +
+    geom_hline(yintercept = c(-0.1,0.1), linetype='dashed',colour = "red") + # default cutoff
+    geom_vline(xintercept = c(-1,1), linetype='dashed',colour = "red") + # default cutoff
+    scale_color_manual('Signficant\nIsoform Switch', values = c(ColorNames[4],ColorNames[6],ColorNames[4],ColorNames[1], 'grey65')) +
+    labs(x='Gene log2 fold change', y='dIF') +
+    theme_bw() + geom_text_repel(size=3, color="black", max.overlaps = Inf, min.segment.length = 0.5) +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+          legend.position="top")
+  
+  return(Plot)
+}
+
+Plot=PlotValidatedChanges(IsoformSwitching[["ONT"]]$isoformFeatures, SelectedTranscrits)
+Plot
+SavePPT(PPT, Plot[[1]], "DTU.pdf", 4, 3)
+
+```
+
+### 4. Gene Ontology and Pathway Analysis
+
+#### a. gProfiler:
+
+```{r goenrichment, echo=F, message=F, warning=F}
+#| label: fig-goprofiler
+
+## GO and pathway enrichment analysis:
+GOPathPlot <-function(SigData){
+  
+  # run GO and pathway enrichment analysis for 
+  # custome universe background but only annotated
+  gostres <- gost(query =SigData, organism = "hsapiens", 
+                    significant = TRUE, user_threshold = 0.05,
+                    sources=c("GO:BP", "KEGG", "REAC", "WP"), 
+                    correction_method = "fdr")
+
+  # create a new output lists 
+  Output=list()
+  
+  # The result is a named list where “result” is a data.frame with the enrichment analysis results
+  # and “meta” containing a named list with all the metadata for the query.
+  Output[["Results"]]=gostres$result
+  
+  # perform the plot gProfiler
+  Output[["Plot"]]=gostplot(gostres, capped = FALSE, interactive = FALSE)
+  
+  return(Output)
+}
+
+# get the isoform switching
+Significant=unique(IsoformSwitching[["ONT"]]$isoformFeatures[which(IsoformSwitching[["ONT"]]$isoformFeatures$isoform_switch_q_value < 0.05 &
+                                                             abs(IsoformSwitching[["ONT"]]$isoformFeatures$dIF > 0.1)),]$gene_id)
+
+# run the function to create the Volcano plots
+GOPlots=GOPathPlot(Significant)
+AllResults=GOPlots[["Results"]]
+
+write.table(AllResults[,-14], "SignificantIsoformSwitching.tab", quote = F, col.names = T, row.names = F)
+
+```
+
+```{r pathwaystudy1, echo=FALSE, message=F, warning=F, eval=T}
+#| label: pathwayanalysis
+#| fig-cap: "Significant pathways"
+#| layout-ncol: 1
+
+# Get the most ancestor for each significant GO
+GO_MostSpecific_OfList <- function(GOTermsBP){ # get a GOTermsBP
+  
+  # Get all the GO::BP with the parents, unique
+  MostSpecificAncestor=unique(GOTermsBP[,c(9,11,14)])
+  MostSpecificAncestor$MostSpecificAncestors="MostSpecific" # Add a tag as the most specific
+  UniqueGO=MostSpecificAncestor$term_id # enter to all GOs
+  while(length(UniqueGO) > 0){ # while UniqueGO has possibilities
+    GOName <- UniqueGO[1] # get the first GO
+    for(GOAncestor in MostSpecificAncestor[MostSpecificAncestor$term_id == GOName,"parents"][[1]]){ # enter each ancestor in the list
+      if(length(MostSpecificAncestor[MostSpecificAncestor$term_id == GOAncestor,"MostSpecificAncestors"]) != 0){ # if it is in the list
+        MostSpecificAncestor[MostSpecificAncestor$term_id == GOAncestor,"MostSpecificAncestors"]="Ancestor" # it is the ancestor of somebody
+      } else{ # if it is not in the list
+        next # continue
+      }
+    }
+    UniqueGO=UniqueGO[UniqueGO != GOName] # remove the GO
+  }
+  return(unique(MostSpecificAncestor[MostSpecificAncestor$MostSpecificAncestors == "MostSpecific",]$term_id)) # return only the ones that are still specific
+}
+
+# get the most ancestor
+MostSpecific=GO_MostSpecific_OfList(AllResults[grep("GO:BP",AllResults$source),])
+
+AllResults=AllResults[order(AllResults$p_value, decreasing = F),]
+
+GOSpecific=AllResults[AllResults$term_id %in% MostSpecific,] # get only the information of the pathways
+Significant=ggplot(GOSpecific, aes(y = term_name, x = intersection_size/term_size, fill = p_value)) + geom_bar(stat = "identity") + 
+  theme_classic() + facet_grid(source~., scales = "free", space="free") + 
+  theme(axis.text = element_text(size = rel(0.5))) + scale_size_continuous(range = c(0, 2)) + 
+  theme(axis.title.y=element_blank()) + scale_fill_viridis(discrete = F, option = "D") + 
+  xlab("Freq of genes with DUT from the total of genes involved") + geom_text(aes(label=intersection_size))
+Significant
+SavePPT(PPT, Significant, "Significant_DTU_GOBP.pdf", 8, 8)
+
+Pathways=AllResults[AllResults$source %in% c("KEGG","REAC","WP"),] # get only the information of the pathways
+Pathways=Pathways[order(Pathways$p_value, decreasing = F),]
+
+Significant=ggplot(Pathways, aes(y = term_name, x = intersection_size/term_size, fill = p_value)) + geom_bar(stat = "identity") + 
+  theme_classic() + facet_grid(source~., scales = "free", space="free") + 
+  theme(axis.text = element_text(size = rel(0.5))) + scale_size_continuous(range = c(0, 2)) + 
+  theme(axis.title.y=element_blank()) + scale_fill_viridis(discrete = F, option = "D") + 
+  xlab("Freq of genes with DUT from the total of genes involved") + geom_text(aes(label=intersection_size))
+Significant
+SavePPT(PPT, Significant, "Significant_DTU_Pathways.pdf", 8, 8)
+
+rm(Pathways, Pathways_Part, PlotSource, PathwayPlot)
+
+```
+
+### 5. Changes in splicing events (SUPPA)
+
+```{r, echo=F, message=F, warning=F}
+
+# Open 
+Monocyte_Isoform.perEvent_Diff=fread("FinalIsoformAnnotation/SUPPA/Monocyte_Isoform.perEvent_Diff.dpsi")
+Monocyte_Isoform.perEvent_Diff$EventType=sub(":.*", "", sub(".*;","",Monocyte_Isoform.perEvent_Diff$V1))
+Monocyte_Isoform.perEvent_Diff[Monocyte_Isoform.perEvent_Diff$`Monocyte_Isoform_Exvivo-Monocyte_Isoform_LPS_p-val` > 0.05, "EventType"]="Not Significant"
+Monocyte_Isoform.perEvent_Diff$Significante="More in LPS"
+Monocyte_Isoform.perEvent_Diff[Monocyte_Isoform.perEvent_Diff$`Monocyte_Isoform_Exvivo-Monocyte_Isoform_LPS_dPSI` < 0, "Significante"]="More in Steady State"
+table(Monocyte_Isoform.perEvent_Diff[,c(4,5)])
+
+Selected=c("ENSG00000162711.19", "ENSG00000184203.8")
+Selected=c("ENSG00000111802.14", "ENSG00000197982.14", "ENSG00000175470")
+Monocyte_Isoform.perEvent_Diff$Names=""
+Monocyte_Isoform.perEvent_Diff[sub(";.*", "", Monocyte_Isoform.perEvent_Diff$V1) %in% Selected[1], "Names"]=paste("NLRP3", "", sep = "\n")
+Monocyte_Isoform.perEvent_Diff[sub(";.*", "", Monocyte_Isoform.perEvent_Diff$V1) %in% Selected[2], "Names"]=paste("PPP1R2", "", sep = "\n")
+
+Monocyte_Isoform.perEvent_Diff[sub(";.*", "", Monocyte_Isoform.perEvent_Diff$V1) %in% Selected[1], "Names"]=paste("TDP2", "", sep = "\n")
+Monocyte_Isoform.perEvent_Diff[sub(";.*", "", Monocyte_Isoform.perEvent_Diff$V1) %in% Selected[2], "Names"]=paste("C1orf122", "", sep = "\n")
+
+Monocyte_Isoform.perEvent_Diff[Monocyte_Isoform.perEvent_Diff$EventType == "Not Significant", "Names"]=""
+
+Monocyte_Isoform.perEvent_Diff$log10_pval=-log10(Monocyte_Isoform.perEvent_Diff$`Monocyte_Isoform_Exvivo-Monocyte_Isoform_LPS_p-val`)
+Monocyte_Isoform.perEvent_Diff$dPSI=Monocyte_Isoform.perEvent_Diff$`Monocyte_Isoform_Exvivo-Monocyte_Isoform_LPS_dPSI`
+Monocyte_Isoform.perEvent_Diff[is.infinite(Monocyte_Isoform.perEvent_Diff$log10_pval),"log10_pval"]=3.1
+
+Events=ggplot(data=Monocyte_Isoform.perEvent_Diff, aes(x=dPSI, y=log10_pval, label=Names, color=EventType)) +
+  geom_point(size=0.5) + 
+  #geom_point(data = ~ subset(., EventType != "not significant", size=0.10)) + 
+  geom_hline(yintercept = -log10(0.05), linetype='dashed',colour = "red") + # default cutoff
+    scale_color_manual('Splicing Events',
+        values = c(ColorNames[8],ColorNames[3],ColorNames[5],ColorNames[6],ColorNames[4],
+                   'grey65',ColorNames[1],ColorNames[2])) +
+    labs(x='dPSI', y='-log10(p-value)') +
+    theme_bw() + geom_text_repel(size=4, color="black", max.overlaps = Inf) + 
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+          legend.position="top") + ylim(0.3,3.5)
+Events
+SavePPT(PPT, Events, "DSE_Suppa.pdf", 3.6, 3)
+
+```
+
+### 6. Summary plot
+
+```{r summary, echo=FALSE, message=F, warning=F}
+#| label: fig-summary
+#| fig-cap: "Results summary"
+#| fig-subcap: 
+#|   - "Pie chart"
+#|   - "Barplot"
+#| layout-ncol: 2
+
+BarplotSummary=data.table(DGE[["ONT"]][,c(1,2,4)], Type="DGE")
+BarplotSummary=rbind(BarplotSummary, data.table(DTE[["ONT"]][,c(1,2,4)], Type="DTE"))
+BarplotSummary$Significance="Not significant"
+BarplotSummary[BarplotSummary$log2FoldChange >= 1 &
+                 BarplotSummary$padj <= 0.05, "Significance"]="More in LPS"
+BarplotSummary[BarplotSummary$log2FoldChange <= -1 &
+                 BarplotSummary$padj <= 0.05, "Significance"]="More in exvivo"
+BarplotSummary=BarplotSummary[,c(1,4,5)]
+BarplotSummaryIsoform=data.table(IsoformSwitching[["ONT"]]$isoformFeatures[,c(3,4,27,28)], Type="Isoform Switching")
+BarplotSummaryIsoform$Significance="Not significant"
+BarplotSummaryIsoform[BarplotSummaryIsoform$dIF >= 0.1 &
+                 BarplotSummaryIsoform$isoform_switch_q_value <= 0.05, "Significance"]="More in LPS"
+BarplotSummaryIsoform[BarplotSummaryIsoform$dIF <= -0.1 &
+                 BarplotSummaryIsoform$isoform_switch_q_value <= 0.05, "Significance"]="More in exvivo"
+BarplotSummary=rbind(BarplotSummary,
+                     data.table(Name=BarplotSummaryIsoform$isoform_id, 
+                                Type=BarplotSummaryIsoform$Type,
+                                Significance=BarplotSummaryIsoform$Significance))
+BarplotSummary=rbind(BarplotSummary,
+                     data.table(Name=unique(BarplotSummaryIsoform$gene_id), 
+                                Type="Gene Switching",
+                                Significance="Not significant"))
+BarplotSummary <- as.data.frame(BarplotSummary)
+str(BarplotSummary)
+
+BarplotPerc <- BarplotSummary %>%
+  mutate(Isoform = if_else(str_detect(Name, "-"), "Novel", "Annotated")) %>%
+  mutate(Isoform = if_else(Type=="DGE", "Annotated", Isoform)) %>%
+  mutate(Isoform = if_else(str_detect(Name, ":"), "Novel", Isoform)) %>%
+  dplyr::count(Type, Significance, Isoform) %>%  # Count occurrences of category by group
+  group_by(Type) %>%  # Group by the 'group' variable
+  mutate(Percentatge = n / sum(n) * 100)  # Calculate percentage within each group
+BarplotPerc$Significance=sub("exvivo","Steady State",BarplotPerc$Significance)
+BarplotPerc$Type=sub(" ","\n",BarplotPerc$Type)
+
+EventsSuppa=fread("FinalIsoformAnnotation/Monocyte_Isoform.events.ioe")
+EventsSuppa$Type="Annotated"
+for(i in 1:nrow(EventsSuppa)){
+  if(length(grep("ENST",strsplit(EventsSuppa[i,]$alternative_transcripts,",")[[1]])) == 0){
+    EventsSuppa[i,"Type"]="Novel"
+  }
+}
+
+EventsSubset=Monocyte_Isoform.perEvent_Diff[,c(1,4,5)]
+colnames(EventsSubset)=c("event_id","EventType","Significance")
+EventsSubset=merge(EventsSubset, EventsSuppa[,c(3,6)], all.x=T)
+EventsSubset[EventsSubset$EventType == "Not Significant","Significance"]="Not significant"
+EventsSubset=data.table(table(EventsSubset[,c(3,4)]))
+
+BarplotPerc=rbind(BarplotPerc,
+                  data.table(Type="Splicing\nEvent", Significance=EventsSubset$Significance,
+                             Isoform=EventsSubset$Type, n=EventsSubset$N, 
+                             Percentatge=EventsSubset$N/sum(EventsSubset$N)*100))
+
+BarplotPerc=BarplotPerc[BarplotPerc$Type != "Gene\nSwitching",]
+Summary=ggplot(BarplotPerc[BarplotPerc$Significance != "Not significant",], aes(x = Isoform, y = Percentatge, fill = Significance)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(n)), position = position_stack(vjust = 0.5)) + 
+  facet_grid(Type~., scale="free") + scale_fill_manual(values=c(ColorNames[1], ColorNames[6])) +
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"),
+        legend.position="none")
+Summary
+SavePPT(PPT, Summary, "Summary_All_DifferentialExpression.pdf", 4, 8)
+
+BarplotPerc[BarplotPerc$Significance != "Not significant",] %>% group_by(Type) %>% mutate(Sum=sum(n))
+BarplotPerc[BarplotPerc$Significance != "Not significant",] %>% group_by(Type, Isoform) %>% mutate(Sum=sum(n))
+
+```
+
+### 7. Validation in RNASeq
+
+```{r validation_rnaseq, echo=F, message=F, warning=F}
+#| label: normaldistirbution1
+#| fig-cap: "dIF validaiton with short reads"
+#| layout-ncol: 1
+
+Significant_ONT=IsoformSwitching[["ONT"]]$isoformFeatures[IsoformSwitching[["ONT"]]$isoformFeatures$isoform_switch_q_value < 0.05 & abs(IsoformSwitching[["ONT"]]$isoformFeatures$dIF) > 0.1,]
+Significant_ONT$Expression="More after activation"
+Significant_ONT[Significant_ONT$dIF < -0.1,"Expression"]="More in Steady state"
+
+Data=rbind(data.table(IsoformSwitching[["InVitro_RNASeq_Ours"]]$isoformFeatures[IsoformSwitching[["InVitro_RNASeq_Ours"]]$isoformFeatures$isoform_id %in% Significant_ONT$isoform_id,c(3,4,25,26)],
+                Type="InVitro_RNASeq_Ours"),
+           data.table(IsoformSwitching[["InVitro_RNASeq_Published"]]$isoformFeatures[IsoformSwitching[["InVitro_RNASeq_Published"]]$isoformFeatures$isoform_id %in% Significant_ONT$isoform_id,c(3,4,25,26)],
+                      Type="InVitro_RNASeq_Published"))
+
+Data=merge(Data, Significant_ONT[,c(3,31)], all.x=T)
+Data=Data %>% tidyr::pivot_longer(cols= starts_with("IF"), 
+             names_to="Treatment", 
+             values_to="IF")
+
+Plot=ggpaired(Data, x = "Treatment", y = "IF", id = "gene_id", color = "Treatment", facet.by =c("Expression", "Type"), line.color = "gray", line.size = 0.1, short.panel.labs = FALSE) + 
+  scale_color_manual(values = c("IF1" = "#6F99ADFF", "IF2" = "#BC3C29FF")) + stat_compare_means(paired = TRUE, method = "wilcox.test", label = "p.format", label.x = 1.35)
+Plot
+SavePPT(PPT, Plot, "ShortRead_Validation.pdf", 6, 6)
+
+```
+
+```{r validation_rnaseq_pieplot, echo=F, message=F, warning=F}
+#| label: pieplot2
+#| fig-cap: "Pie chart"
+#| layout-ncol: 1
+
+SummarizeData <- function(Data, number){
+  DataExpression <- Data %>%
+      mutate(Expression2 = case_when(
+        dIF >= 0.1 & isoform_switch_q_value <= 0.05 ~ "dIF > 0.1 and q < 0.05",
+        dIF > 0 & isoform_switch_q_value <= 0.05 ~ "dIF > 0 and q < 0.05",
+        dIF <= -0.1 & isoform_switch_q_value <= 0.05 ~ "dIF < -0.1 and q < 0.05",
+        dIF < 0 & isoform_switch_q_value <= 0.05 ~ "dIF < 0 and q < 0.05",
+        TRUE ~ "Not Significant"
+  ))
+  DataExpression=DataExpression[,c(3,31)]
+  colnames(DataExpression)=c("isoform_id", paste0("Expression", number))
+  
+  return(DataExpression)
+}
+
+PiePlotValidation <- function(Name, Name2, IsoformSwitching, ONTData){
+  DataExpression=SummarizeData(IsoformSwitching[[Name]]$isoformFeatures[
+  IsoformSwitching[[Name]]$isoformFeatures$isoform_id %in% 
+    ONTData$isoform_id,], 1)
+  DataExpression2=SummarizeData(IsoformSwitching[[Name2]]$isoformFeatures[
+  IsoformSwitching[[Name2]]$isoformFeatures$isoform_id %in% 
+    ONTData$isoform_id,], 2)
+  
+  SummaryPerCategory=merge(DataExpression, ONTData[,c(3,31)], all.x=T) %>%
+    merge(., DataExpression2, all.x=T) %>%
+    mutate(
+      Expression1 = if_else(is.na(Expression1), Expression2, Expression1),
+      Expression2 = if_else(is.na(Expression2), Expression1, Expression2)
+    ) %>%
+    mutate(Category = case_when(
+      (Expression1 == "Not Significant" & 
+         Expression2 == "Not Significant") ~ "Not Significant",
+      (Expression1 == "dIF > 0.1 and q < 0.05" | 
+         Expression2 == "dIF > 0.1 and q < 0.05") & 
+        Expression == "More after activation" ~ "dIF > 0.1 and q < 0.05",
+      (Expression1 == "dIF > 0 and q < 0.05" | 
+         Expression2 == "dIF > 0 and q < 0.05") & 
+        Expression == "More after activation" ~ "dIF > 0 and q < 0.05",
+            (Expression1 == "dIF < -0.1 and q < 0.05" | 
+         Expression2 == "dIF < -0.1 and q < 0.05") & 
+        Expression == "More in Steady state" ~ "dIF < -0.1 and q < 0.05",
+            (Expression1 == "dIF < 0 and q < 0.05" | 
+         Expression2 == "dIF < 0 and q < 0.05") & 
+        Expression == "More in Steady state" ~ "dIF < 0 and q < 0.05",
+      TRUE ~ "Opposite direction"
+    )) %>% 
+    dplyr::count(Category)
+  
+  SummaryPerCategory$Category=factor(SummaryPerCategory$Category,
+                  levels = c("dIF > 0.1 and q < 0.05","dIF > 0 and q < 0.05",
+                             "dIF < -0.1 and q < 0.05", "dIF < 0 and q < 0.05", 
+                             "Opposite direction", "Not Significant"))
+  
+  # Pie Plot
+  PiePlot <- ggplot(SummaryPerCategory, aes(x = "", y = n, fill = Category)) +
+    geom_col(width = 1) +
+    coord_polar(theta = "y") +
+    theme_void() +
+    geom_text(aes(label = paste0(n, " (", round(n / sum(n) * 100), "%)")),
+              position = position_stack(vjust = 0.5)) + 
+    scale_fill_manual(values = c(ColorNames[3], ColorNames[7],
+                                 ColorNames[5], ColorNames[6],
+                                 "grey50", "grey70"))
+  SavePPT(PPT, PiePlot, paste0("PieIsoformSwitchValidation.pdf"), 4, 3)
+
+  return(PiePlot)
+}
+
+PiePlotValidation("InVitro_RNASeq_Ours", "InVitro_RNASeq_Published", 
+                  IsoformSwitching, Significant_ONT)
+
+print(PPT, target = "Fig3/Figure3.pptx")
+print("Run all")
+
+```
+
+# Fig. 4: Isoform switching consequences
+
+```{r isoform_switching_table, echo=F, message=T, warning=F, eval=T}
+
+PPT <- read_pptx()
+
+SavePPT <-function(PPT,Plot,Name, width_1, height_1){
+  ggsave(paste0("Fig4/",Name),bg="white", width = width_1, height = height_1)
+  fig_vg <- dml(ggobj = Plot)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location(width = width_1, 
+                                                             height = height_1))
+  return(PPT)
+}
+
+IsoformSwitchingConsequences <-function(IsoformSwitching, PATH, Type){
+  # Get all files
+  GetAllFiles=list.files(PATH)
+  
+  if(length(GetAllFiles[grep("result.ORF_prob.best.tsv",GetAllFiles)]) == 1){
+    ## CPAT
+    fread(paste0(PATH, GetAllFiles[grep("result.ORF_prob.best.tsv",GetAllFiles)])) %>%
+      dplyr::mutate(`Coding Label` = ifelse(Coding_prob >= 0.364, "yes", "no"),
+                    `Sequence Name` = ifelse(!grepl("^ENST",seq_ID),tolower(seq_ID), seq_ID),
+                    `RNA size` = mRNA,
+                    `ORF size` = ORF,
+                    `Ficket Score` = Fickett,
+                    `Hexamer Score` = Hexamer,
+                    `Coding Probability` = Coding_prob) %>%
+      dplyr::arrange(`Sequence Name`) %>%
+      dplyr::mutate(`Data ID` = dplyr::row_number()) %>%
+      as.data.frame() %>%
+      .[,c("Data ID","Sequence Name","RNA size","ORF size","Ficket Score","Hexamer Score","Coding Probability","Coding Label")] %>%
+      write.table(.,paste0(PATH, GetAllFiles[grep("result.ORF_prob.best.tsv",GetAllFiles)],".result"),quote = FALSE,sep="\t",row.names = FALSE)
+  } else {
+    GetAllFiles=GetAllFiles[-grep("result.ORF_prob.best.tsv.result",GetAllFiles)]
+  }
+  
+  ### Add CPAT analysis
+  IsoformSwitching[[Type]] <- analyzeCPAT(
+      switchAnalyzeRlist   = IsoformSwitching[[Type]],
+      pathToCPATresultFile = paste0(PATH, GetAllFiles[grep("result.ORF_prob.best.tsv",GetAllFiles)],".result"),
+      codingCutoff         = 0.364, # the coding potential cutoff we suggested for human
+      removeNoncodinORFs   = FALSE   # because ORF was predicted de novo
+  )
+  
+  ### Add PFAM analysis
+  IsoformSwitching[[Type]] <- analyzePFAM(
+      switchAnalyzeRlist   = IsoformSwitching[[Type]],
+      pathToPFAMresultFile = paste0(PATH, GetAllFiles[grep("pfam_all",GetAllFiles)]),
+      showProgress=FALSE
+  )
+  
+  ### Add SignalP analysis
+  IsoformSwitching[[Type]] <- analyzeSignalP(
+      switchAnalyzeRlist       = IsoformSwitching[[Type]],
+      pathToSignalPresultFile  = paste0(PATH, GetAllFiles[grep("prediction_results",GetAllFiles)])
+  )
+  
+  ### Add IUPred3 analysis
+  IsoformSwitching[[Type]] <- analyzeIUPred2A(
+      switchAnalyzeRlist        = IsoformSwitching[[Type]],
+      pathToIUPred2AresultFile = paste0(PATH, GetAllFiles[grep("IUPred3",GetAllFiles)]),
+      showProgress = FALSE
+  )
+  
+  ### Add DeepTMHMM analysis
+  IsoformSwitching[[Type]] <- analyzeDeepTMHMM(
+      switchAnalyzeRlist   = IsoformSwitching[[Type]],
+      pathToDeepTMHMMresultFile = paste0(PATH, GetAllFiles[grep(".gff3",GetAllFiles)]),
+      showProgress=FALSE
+  )
+  
+  # analyze splicing
+  IsoformSwitching[[Type]] <- analyzeAlternativeSplicing(IsoformSwitching[[Type]])
+  
+  ### Analyse consequences
+  IsoformSwitching[[Type]] <- analyzeSwitchConsequences(IsoformSwitching[[Type]],
+                                                        consequencesToAnalyze = c("tss", "tts", "last_exon", "isoform_seq_similarity", "isoform_length", "exon_number", "intron_structure", "intron_retention", "isoform_class_code", "coding_potential", "ORF_seq_similarity", "ORF_genomic", "ORF_length", "5_utr_seq_similarity", "5_utr_length", "3_utr_seq_similarity", "3_utr_length", "NMD_status", "domains_identified", "domain_isotype", "domain_length", "genomic_domain_position", "IDR_identified", "IDR_length", "IDR_type", "signal_peptide_identified", "isoform_topology", "extracellular_region_count", "intracellular_region_count", "extracellular_region_length", "intracellular_region_length"))
+  
+  ### Summary
+  extractSwitchSummary(IsoformSwitching[[Type]], filterForConsequences = TRUE)
+  Table=extractConsequenceEnrichment(
+      IsoformSwitching[[Type]],
+      consequencesToAnalyze='all',
+      analysisOppositeConsequence = TRUE,
+      localTheme = theme_bw(base_size = 12), # Increase font size in vignette
+      returnResult = TRUE # if TRUE returns a data.frame with the summary statistics
+  )
+  
+  Table$feature=sub("\\)","", sub(".*\\(paired with ","", Table$feature))
+  
+  Table$propOfRelevantEvents=1-Table$propOfRelevantEvents
+  Table$propCiLo=1-Table$propCiLo
+  Table$propCiHi=1-Table$propCiHi
+  
+  Selected=c("tss", "tts", "last_exon", "isoform_seq_similarity", "isoform_length",
+             "exon_number", "intron_structure", "intron_retention", "isoform_class_code",
+             "ORF","ORF_length","x3_utr_length", "x5_utr_length")
+  Subset=Table[Table$conseqPair %in% Selected,]
+  Subset$feature=factor(Subset$feature,
+                      levels=rev(Subset[match(c("isoform_length", "tss", "x5_utr_length",
+                                                "exon_number", "intron_retention",
+                                                "ORF","ORF_length",
+                                                "last_exon","x3_utr_length", "tts"),
+                                                 Subset$conseqPair),]$feature))
+
+  Plot=ggplot(Subset, aes(x = propOfRelevantEvents, 
+              y = feature, colour=Significant)) + 
+    geom_point(aes(size=(nDown+nUp))) +
+    geom_errorbar(aes(xmin = propCiLo, xmax = propCiHi), width = 0.2) + theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+          axis.title.y=element_blank(), legend.position="top", 
+          axis.title.x = element_text(size = 1)) + 
+    xlab("Fraction of Genes Having the Consequence Indicated\n(of Genes Affected by Either of Opposing Consequences)\n (With 95% Confident Interval)") + geom_vline(xintercept = 0.50, linetype = "dashed", color = "red") +
+    scale_color_manual(values = c("TRUE"="#BC3C29FF","FALSE"="#0072B5FF"))
+  plot(Plot)
+  
+  Selected=c("coding_potential", "NMD_status","isoform_topology",
+             "domains_identified","domain_length", "extracellular_region_count",
+             "extracellular_region_length", "intracellular_region_count",
+             "intracellular_region_length", "IDR_identified", "IDR_length",
+             "signal_peptide_identified")
+  Subset=Table[Table$conseqPair %in% Selected,]
+  Subset$feature=factor(Subset$feature,
+                        levels=rev(Subset[match(c("coding_potential", "NMD_status",
+                                                  "isoform_topology", "domains_identified",
+                                      "domain_length", "extracellular_region_count",
+                                      "extracellular_region_length",
+                                      "intracellular_region_count",
+                                      "intracellular_region_length",
+                                      "IDR_identified", "IDR_length",
+                                      "signal_peptide_identified"),
+                                            Subset$conseqPair),]$feature))
+  Plot2=ggplot(Subset, aes(x = propOfRelevantEvents, 
+              y = feature, colour=Significant)) + 
+    geom_point(aes(size=(nDown+nUp))) +
+    geom_errorbar(aes(xmin = propCiLo, xmax = propCiHi), width = 0.2) + theme_bw() + 
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+          axis.title.y=element_blank(), legend.position="top", 
+          axis.title.x = element_text(size = 1)) + 
+    xlab("Fraction of Genes Having the Consequence Indicated\n(of Genes Affected by Either of Opposing Consequences)\n (With 95% Confident Interval)") + geom_vline(xintercept = 0.50, linetype = "dashed", color = "red") +
+    scale_color_manual(values = c("TRUE"="#BC3C29FF","FALSE"="#0072B5FF"))
+  plot(Plot2)
+  library(ggplotify)
+  Plot <- as.ggplot(Plot)
+  SavePPT(PPT, Plot, paste0(Type,"ShortRead_Validation.pdf"), 6, 5)
+  Plot2 <- as.ggplot(Plot2)
+  SavePPT(PPT, Plot2, paste0(Type,"ShortRead_Validation2.pdf"), 6, 5)
+  return(IsoformSwitching)
+}
+
+IsoformSwitching=IsoformSwitchingConsequences(IsoformSwitching, "ReferenceGenome/IsoformSwitchAnalyzer/Results/ONT/", "ONT")
+IsoformSwitching=IsoformSwitchingConsequences(IsoformSwitching, "ReferenceGenome/IsoformSwitchAnalyzer/Results/InVitroOurs/", "InVitro_RNASeq_Ours")
+IsoformSwitching=IsoformSwitchingConsequences(IsoformSwitching, "ReferenceGenome/IsoformSwitchAnalyzer/Results/InVitroPublished/", "InVitro_RNASeq_Published")
+ 
+print(PPT, target = "Fig4/Figure4.pptx")
+
+```
+
+# Fig. 5: Specific examples
+
+## NLRP3 isoforms
+
+```{r isoform_switching_table, echo=F, message=T, warning=F, eval=T}
+
+### Visual analysis
+# Indiviudal switches
+
+NLRP3=switchPlotTranscript(IsoformSwitching[["ONT"]], gene = 'NLRP3', dIFcutoff = 0, IFcutoff = 0)
+NLRP3 <- as.ggplot(NLRP3)
+SavePPT(PPT, NLRP3, "NLRP3.pdf", 8, 4)
+  
+Gene=switchPlotGeneExp(IsoformSwitching[["ONT"]], gene = 'NLRP3') + theme_bw() + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        title = element_blank()) + 
+    scale_fill_manual(values = c("LPS"="#BC3C29FF","aSteady.state"="#6F99ADFF"))
+
+NLRP3=IsoformSwitching[["ONT"]]$isoformFeatures[IsoformSwitching[["ONT"]]$isoformFeatures$gene_id == "NLRP3",]
+
+NLRP3Gene=unique(NLRP3 %>% 
+  dplyr::select(gene_value_1, gene_value_2, gene_stderr_1, gene_stderr_2)) %>%
+  pivot_longer(cols = starts_with("gene_"), 
+               names_to = "gene", 
+               values_to = "value") %>%
+  mutate(Treatment = ifelse(grepl("1", gene), "exvivo", "LPS")) %>%
+  mutate(gene = sub("_1","",sub("_2","",gene))) %>% group_by(Treatment) %>%
+  pivot_wider(names_from = gene) %>%
+  mutate(gene_ci=gene_stderr*1.96)
+  
+GenePlot=ggplot(NLRP3Gene, aes(x = Treatment, 
+                      y = gene_value, fill=Treatment)) +   geom_bar(stat = "identity", color = "black") +
+    geom_errorbar(aes(ymin = gene_value-gene_ci, ymax = gene_value+gene_ci), width = 0.2) + 
+    theme_bw() +
+    theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+          axis.title.y=element_blank()) + 
+    scale_fill_manual(values = c("LPS"="#BC3C29FF","exvivo"="#6F99ADFF")) + ylim(0, 800)
+
+SavePPT(PPT, GenePlot, "NLRP3_Gene.pdf", 3, 4)
+
+
+DIU_Plot=switchPlotIsoUsage(IsoformSwitching[["ONT"]], gene = 'NLRP3', IFcutoff = 0) + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), axis.title.y=element_blank(), title = element_blank()) + scale_fill_manual(values = c("LPS"="#BC3C29FF","aSteady.state"="#6F99ADFF"))
+
+SavePPT(PPT, DIU_Plot, "NLRP3_IU.pdf", 6, 4)
+
+print(PPT, target = "Fig5/Figure5.1.pptx")
+
+```
+
+## TDP2 isoforms
+
+```{r isoform_switching_table, echo=F, message=T, warning=F, eval=T}
+
+### Add PFAM analysis
+IsoformSwitching[["ONT"]] <- analyzePFAM(
+      switchAnalyzeRlist   = IsoformSwitching[["ONT"]],
+      pathToPFAMresultFile = "ReferenceGenome/IsoformSwitchAnalyzer/TDP2.result",
+      showProgress=FALSE
+)
+
+TDP2=switchPlotTranscript(IsoformSwitching[["ONT"]], gene = 'TDP2', dIFcutoff = 0, IFcutoff = 0, plotTopology=FALSE) + ggtitle("") +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"),
+        title = element_blank())
+TDP2 <- as.ggplot(TDP2)
+SavePPT(PPT, TDP2, "TDP2.pdf", 8, 4)
+
+
+SavePPT(PPT, TDP2, "TDP2_Isoforms.pdf", 6, 4)
+
+print(PPT, target = "Fig5/Figure5.1.pptx")
+
+```
+
+```{r final, echo=FALSE, include=F, eval=F}
+
+print("Run all")
+
+```
