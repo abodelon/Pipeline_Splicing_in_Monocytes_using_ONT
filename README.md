@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1233134201.svg)](https://doi.org/10.5281/zenodo.20088546)
+
 # Native long-read RNA sequencing of human monocytes reveals activation-induced alternative splicing toward functional isoforms
 
 ## Overview
