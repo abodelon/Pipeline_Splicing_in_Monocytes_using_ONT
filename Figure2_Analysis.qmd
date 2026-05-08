@@ -1,0 +1,875 @@
+---
+title: "Figure 2: Isoforms in monocytes"
+author: "Alejandra Bodelon"
+format:
+  html:
+    extra_dependencies: ["float"]
+    fig-pos: H
+    toc: true
+    toc-location: left
+    embed-resources: true
+editor: visual
+---
+
+# Paper figures:
+
+```{r, echo=FALSE, include=F}
+
+library(RColorBrewer)
+library(data.table)
+library(ggplot2)
+library(dbplyr)
+library(tidyverse)
+library(tidyr)
+library(ggsci)
+library(ggvenn)
+library(gridExtra)
+library(ggpubr)
+library(officer)
+library(rvg)
+
+SavePPT <-function(PPT,Plot,Name, width_1, height_1){
+  ggsave(paste0("Fig2/",Name),bg="white", width = width_1, height = height_1)
+  fig_vg <- dml(ggobj = Plot)
+  PPT <- add_slide(PPT)
+  PPT <- ph_with(PPT, value = fig_vg, location = ph_location(width = width_1, 
+                                                             height = height_1))
+  return(PPT)
+}
+
+PPT <- read_pptx()
+
+ColorNames=pal_nejm("default")(8)
+
+```
+
+## Figure 2. Isoform description
+
+### 1. Transcript length distribution
+
+Length distribution of the isoforms in our new reference transcriptome (called Novel Isoform) and in GENCODE.
+
+```{r, echo=FALSE, warning=F}
+#| label: fig-2A
+#| fig-cap: "Transcript length distribution: flair dataset vs GENECODE"
+#| layout-ncol: 1
+
+### Transcript length distribution
+ExtractInfoFromGTF<-function(FileName){
+  GTFFile=fread(FileName, header=F) # open GTF
+  LengthTable=GTFFile %>%
+    subset(V3=="exon") %>%
+    mutate(transcript_id=sub('".*','',sub('.*transcript_id "','',V9))) %>%
+    mutate(gene_id=sub('".*','',sub('.*gene_id "','',V9))) %>%
+    mutate(gene_type=sub('".*','',sub('.*gene_type "','',V9))) %>%
+    mutate(ExonLength=V5-V4+1) %>%
+    group_by(transcript_id) %>% mutate(TranscriptLength=sum(ExonLength))
+  return(LengthTable[,c(10:14)]) # return table
+}
+
+# Run the function in the reference genome and in the reference transcriptome
+ENSMBL=ExtractInfoFromGTF("ReferenceGenome/gencode.v46.primary_assembly.annotation.gtf")
+ENSMBL$Annotation="aGENCODE"
+FLAIR=ExtractInfoFromGTF("FinalIsoformAnnotation/Monocyte_Isoforms.final.gtf")
+FLAIR$Annotation="Expressed transcriptome in monocytes"
+
+# join all information
+IsoformLength=rbind(unique(ENSMBL[,c(1,2,3,5,6)]), FLAIR[,c(1,2,3,5,6)])
+
+Comparison=list(c("aGENCODE","Expressed transcriptome in monocytes"))
+
+print(paste("Wilcoxon test between the isoform length of the atlas vs GENCODE annotations: ", wilcox.test(log10(IsoformLength[IsoformLength$Annotation == "Expressed transcriptome in monocytes",]$TranscriptLength),log10(IsoformLength[IsoformLength$Annotation == "aGENCODE",]$TranscriptLength))$p.value))
+
+# compute the proportion for each length
+LengthPlot=ggplot(IsoformLength, aes(x = log10(TranscriptLength), fill = Annotation)) +
+    geom_histogram(aes(y=..count../sum(..count..), fill = Annotation), position="identity",binwidth = 0.1, alpha=0.6) + ylab('Frequency') +
+  xlab(expression(paste({Log[10]},'(transcript length'))) +
+  theme_classic() + theme(axis.text = element_text(size = rel(0.75), hjust=1), strip.text = element_text(size = rel(0.75)), 
+        legend.position = "top", legend.title = element_text(size = rel(1),face = "bold"), legend.text = element_text(size = rel(0.75)), 
+        axis.title = element_text(size = rel(1))) + scale_fill_manual(values=c(ColorNames[3],ColorNames[4]))
+SavePPT(PPT, LengthPlot, "LengthPlot.pdf", 4, 3)
+
+LengthPlot
+
+# rm(IsoformLength, LengthPlot)
+
+```
+
+### 2. Overlap with other studies
+
+Comparison of the isoforms annotated in our Isoform atlas and in GENCODE.
+
+```{r, echo=FALSE, warning=F}
+#| label: fig-2B.2
+#| fig-cap: "Overlap of the Isoform atlas with the GENCODE reference"
+#| fig-subcap: 
+#|   - "Coding isoforms"
+#|   - "Genes"
+#| layout-ncol: 2
+
+### Transcript validation
+Monocyte_Isoforms_classification=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt", header=T)
+Monocyte_Isoforms_classification=Monocyte_Isoforms_classification[,c("isoform","coding")]
+
+# join all information
+GeneOverlap=list('GENCODE'=unique(ENSMBL$transcript_id), 
+                 'Isoform Atlas'=unique(FLAIR$transcript_id))
+
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, 
+             fill_color = c(ColorNames[3],ColorNames[4]), fill_alpha = 0.8, 
+       stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", 
+       set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+SavePPT(PPT, Genes, "VennDiagram_Isoforms.pdf", 4, 3)
+
+# join all information
+GeneOverlap=list('GENCODE [coding]'=unique(ENSMBL[ENSMBL$gene_type == "protein_coding",]$transcript_id), 
+                 'Isoforms [predicted coding]'=unique(FLAIR[FLAIR$transcript_id %in% 
+        unique(Monocyte_Isoforms_classification[Monocyte_Isoforms_classification$coding ==
+                                                  "coding",]$isoform),]$transcript_id))
+
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, 
+             fill_color = c(ColorNames[3],ColorNames[4]), fill_alpha = 0.8, 
+       stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", 
+       set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+
+print(paste("Total of novel isoforms: ", round(length(GeneOverlap['Isoforms [predicted coding]']$`Isoforms [predicted coding]`[!GeneOverlap['Isoforms [predicted coding]']$`Isoforms [predicted coding]` %in% GeneOverlap['GENCODE [coding]']$`GENCODE [coding]`])/length(GeneOverlap['Isoforms [predicted coding]']$`Isoforms [predicted coding]`)*100, 2),"%", sep=""))
+SavePPT(PPT, Genes, "VennDiagram_IsoformCoding.pdf", 4, 3)
+
+# join all information
+GeneOverlap=list('GENCODE genes'=unique(ENSMBL$gene_id), 
+                 'Isoforms genes'=unique(FLAIR$gene_id))
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, 
+             fill_color = c(ColorNames[3],ColorNames[4]), fill_alpha = 0.8,
+             stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", 
+             set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+SavePPT(PPT, Genes, "VennDiagram_Genes.pdf", 4, 3)
+
+print(paste("Total new genes: ", round(length(GeneOverlap['Isoforms']$`Isoforms`[!GeneOverlap['Isoforms']$`Isoforms` %in% GeneOverlap['GENCODE']$`GENCODE`])/length(GeneOverlap['Isoforms']$`Isoforms`)*100, 3),"%", sep=""))
+
+rm(GeneOverlap, Genes)
+
+# join all information
+GeneOverlap=list('GENCODE genes [coding]'=unique(ENSMBL[ENSMBL$gene_type == "protein_coding",]$gene_id), 
+                 'Isoforms genes [predicted coding]'=unique(FLAIR[FLAIR$transcript_id %in% 
+        unique(Monocyte_Isoforms_classification[Monocyte_Isoforms_classification$coding ==
+                                                  "coding",]$isoform),]$gene_id))
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, 
+             fill_color = c(ColorNames[3],ColorNames[4]), fill_alpha = 0.8,
+             stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", 
+             set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+SavePPT(PPT, Genes, "VennDiagram_GenesCoding.pdf", 4, 3)
+
+print(paste("Total of novel genes predicted to be coding: ", round(length(GeneOverlap['Isoforms [predicted coding]']$`Isoforms [predicted coding]`[!GeneOverlap['Isoforms [predicted coding]']$`Isoforms [predicted coding]` %in% GeneOverlap['GENCODE [coding]']$`GENCODE [coding]`])/length(GeneOverlap['Isoforms [predicted coding]']$`Isoforms [predicted coding]`)*100, 2),"%", sep=""))
+
+```
+
+Comparison of the isoforms annotated in our Isoform atlas and in TRAILs (paper of Inamo, J., et al). We used exact match of intron chain to compare the isoforms.
+
+```{r, echo=FALSE, warning=F}
+#| label: fig-2B.2c
+#| fig-cap: "Overlap of the Isoform atlas with TRAILs"
+#| fig-subcap: 
+#|   - "Exact match of intron chain."
+#| layout-ncol: 2
+
+# Class code	Transcript category
+# =	Annotated in reference
+# j	Novel isoform of reference
+# u	Intergenic
+# x	Anti-sense
+# r	Repetitive
+# c	Contained in exon of reference
+# s	Anti-sense spliced intronic
+# e	Single exon transfrag overlapping a reference exon and at least 10 bp of a reference intron, indicating a possible pre-mRNA fragment.
+# i	A transfrag falling entirely within a reference intron
+# o	Generic exonic overlap with a reference transcript
+# p	Possible polymerase run-on fragment (within 2Kbases of a reference transcript)
+
+#  --strict-match : transcript matching takes into account the -e range for terminal exons; 
+# code '=' is only assigned if transcript ends are within that range, otherwise code '~' is assigned just for intron chain
+# match (or significant overlap in the case of single exon transcripts)
+
+### Validated with strict-match "="
+
+### Transcript validation with TRAILS
+FLAIR_TR=fread("TRAILS/Iso_Trails.annotated.gtf", header=F)
+FLAIR_TR=FLAIR_TR[FLAIR_TR$V3 == "transcript",]
+FLAIR_TR$transcript_id=sub('.*transcript_id "',"",FLAIR_TR$V9)
+FLAIR_TR$transcript_id=sub('".*',"",FLAIR_TR$transcript_id)
+FLAIR_TR$class_code=sub('.*class_code "',"",FLAIR_TR$V9)
+FLAIR_TR$class_code=sub('".*',"",FLAIR_TR$class_code)
+FLAIR_TR$cmp_ref=sub('.*cmp_ref "',"",FLAIR_TR$V9)
+FLAIR_TR$cmp_ref=sub('".*',"",FLAIR_TR$cmp_ref)
+FLAIR_TR=FLAIR_TR[,c(10,11,12)]
+FLAIR_TR$transcript_id_intersect=FLAIR_TR$transcript_id
+FLAIR_TR[FLAIR_TR$class_code == "=" | FLAIR_TR$class_code == "~","transcript_id_intersect"]=FLAIR_TR[FLAIR_TR$class_code == "=" | FLAIR_TR$class_code == "~",]$cmp_ref
+FLAIR_TR_Novel=FLAIR_TR[grep("-", FLAIR_TR$transcript_id),]
+
+# TRAILS
+TRAILS=fread("TRAILS/TRAILS.gtf", header=F, skip=3)
+TRAILS=TRAILS[TRAILS$V3 == "transcript",]
+TRAILS$transcript_id=sub(".*transcript_id \"","",TRAILS$V9)
+TRAILS$transcript_id=sub("\".*","",TRAILS$transcript_id)
+TRAILS=TRAILS[,10]
+
+# join all information
+GeneOverlap=list('TRAILs'=TRAILS$transcript_id, 
+                 'Novel transcriptome [novel]'=FLAIR_TR_Novel$transcript_id_intersect)
+
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, fill_color = c(ColorNames[2],ColorNames[4]), fill_alpha = 0.8, 
+       stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+length(GeneOverlap[['Novel transcriptome [novel]']][GeneOverlap[['Novel transcriptome [novel]']] %in% GeneOverlap[['TRAILs']]])
+length(GeneOverlap[['Novel transcriptome [novel]']][!GeneOverlap[['Novel transcriptome [novel]']] %in% GeneOverlap[['TRAILs']]])
+SavePPT(PPT, Genes, "VennDiagram_TRIALS_Relax_Novels.pdf", 4, 3)
+
+rm(ExtractInfoFromGTF, GeneOverlap, Genes, FLAIR_TR, TRAILS)
+
+```
+
+Comparison to the isoforms annotated in FLIBase:
+
+```{r, echo=FALSE, warning=F, eval=T}
+#| label: fig-2B.2c
+#| fig-cap: "Overlap of the Isoform atlas with FLIBase"
+#| layout-ncol: 1
+
+### Transcript validation with TRAILS
+FLAIR_TR=fread("ReferenceGenome/FLIBase/transcript_info_v4_NotStrict.annotated.gtf", header=F)
+FLAIR_TR=FLAIR_TR[FLAIR_TR$V3 == "transcript",]
+FLAIR_TR$transcript_id=sub('.*transcript_id "',"",FLAIR_TR$V9)
+FLAIR_TR$transcript_id=sub('".*',"",FLAIR_TR$transcript_id)
+FLAIR_TR$class_code=sub('.*class_code "',"",FLAIR_TR$V9)
+FLAIR_TR$class_code=sub('".*',"",FLAIR_TR$class_code)
+FLAIR_TR$cmp_ref=sub('.*cmp_ref "',"",FLAIR_TR$V9)
+FLAIR_TR$cmp_ref=sub('".*',"",FLAIR_TR$cmp_ref)
+FLAIR_TR=FLAIR_TR[,c(10,11,12)]
+FLAIR_TR$transcript_id_intersect=FLAIR_TR$transcript_id
+FLAIR_TR[FLAIR_TR$class_code == "=","transcript_id_intersect"]=FLAIR_TR[FLAIR_TR$class_code == "=",]$cmp_ref
+FLAIR_TR_Novel=FLAIR_TR[grep("-", FLAIR_TR$transcript_id),]
+
+# FLIBase
+FLIBase=fread("ReferenceGenome/FLIBase/transcript_info_v4.gtf", header=F, skip=3)
+FLIBase=FLIBase[FLIBase$V3 == "transcript",]
+FLIBase$transcript_id=sub(".*transcript_id \"","",FLIBase$V9)
+FLIBase$transcript_id=sub("\".*","",FLIBase$transcript_id)
+FLIBase=FLIBase[,10]
+
+# join all information
+GeneOverlap=list('FLIBase'=FLIBase$transcript_id, 
+                 'Novel transcriptome [novel]'=FLAIR_TR_Novel$transcript_id_intersect)
+
+# compute the proportion for each length
+Genes=ggvenn(GeneOverlap, show_elements = FALSE, show_percentage = TRUE, digits = 1, fill_color = c(ColorNames[5],ColorNames[4]), fill_alpha = 0.8, 
+       stroke_color = "white", stroke_alpha = 0.5, stroke_size = 0, stroke_linetype = "solid", set_name_color = "black",
+       set_name_size = 4, text_color = "black", text_size = 3.5, label_sep = ",") 
+Genes
+length(GeneOverlap[['Novel transcriptome [novel]']][GeneOverlap[['Novel transcriptome [novel]']] %in% GeneOverlap[['FLIBase']]])/nrow(FLAIR_TR_Novel)*100
+length(GeneOverlap[['Novel transcriptome [novel]']][!GeneOverlap[['Novel transcriptome [novel]']] %in% GeneOverlap[['FLIBase']]])/nrow(FLAIR_TR_Novel)*100
+SavePPT(PPT, Genes, "VennDiagram_FLIBase_Novels.pdf", 4, 3)
+
+rm(ExtractInfoFromGTF, GeneOverlap, Genes, FLAIR_TR, FLIBase)
+
+```
+
+### 3. Splicing events
+
+Types of splicing events in all isoforms expressed/included in the Novel Isoform (novel and annotated).
+
+```{r, echo=FALSE}
+#| label: fig-2Db
+#| fig-cap: "Splicing event classification in the Isoform atlas"
+#| fig-subcap: 
+#|   - "Novel vs annotated"
+#| layout-ncol: 1
+
+# SUPPA Classification
+lr_suppa=fread("FinalIsoformAnnotation/Monocyte_Isoform.events.ioe")
+
+# prepare the data
+# our data
+lr_suppa_1=lr_suppa %>%
+  tidyr::separate_rows(.,alternative_transcripts, sep = ",", convert = TRUE) %>% # separate the transcript id of the event
+  # get the event in the middle of ; and :
+  dplyr::mutate(event_id = stringr::str_split(event_id,pattern=";",simplify=TRUE) %>% .[,2] %>% # separate the event id by ; in a new columnd
+                  stringr::str_split(.,pattern=":",simplify=TRUE) %>% .[,1]) %>% # separate the new column by : and only get the event id
+    dplyr::select(c(event_id,alternative_transcripts)) %>% # select the columns
+     filter(!str_starts(alternative_transcripts, "ENST")) %>%
+    dplyr::group_by(event_id) %>% # group by event id
+    dplyr::summarise(count = dplyr::n()) %>% # count number of events
+    dplyr::filter(event_id!="") %>% # remove the empty ones
+    dplyr::mutate(Proportion = 100*count/sum(count), # compute the proportion of each event
+                  Group = "Novel in monocytes",
+                  Event_id = factor(event_id, levels = c("SE","MX","A5","A3","RI","AF","AL")))
+
+# prepare the data
+# our data
+gen_suppa=lr_suppa %>%
+  tidyr::separate_rows(.,alternative_transcripts, sep = ",", convert = TRUE) %>% # separate the transcript id of the event
+  # get the event in the middle of ; and :
+  dplyr::mutate(event_id = stringr::str_split(event_id,pattern=";",simplify=TRUE) %>% .[,2] %>% # separate the event id by ; in a new columnd
+                  stringr::str_split(.,pattern=":",simplify=TRUE) %>% .[,1]) %>% # separate the new column by : and only get the event id
+    dplyr::select(c(event_id,alternative_transcripts)) %>% # select the columns
+     filter(str_starts(alternative_transcripts, "ENST")) %>%
+    dplyr::group_by(event_id) %>% # group by event id
+    dplyr::summarise(count = dplyr::n()) %>% # count number of events
+    dplyr::filter(event_id!="") %>% # remove the empty ones
+    dplyr::mutate(Proportion = 100*count/sum(count), # compute the proportion of each event
+                  Group = "Annotated in monocytes",
+                  Event_id = factor(event_id, levels = c("SE","MX","A5","A3","RI","AF","AL")))
+
+# merge the events
+AllEvents=rbind(gen_suppa, lr_suppa_1)
+
+# splicing events defined by SUPPA2
+EventTypes = ggplot(data=AllEvents, aes(x=Event_id, y=Proportion, fill=Group)) + 
+  geom_bar(stat="identity", position=position_dodge()) +
+  theme_classic() +
+  ylab("Proportion (%)") +
+  xlab("Splicing events") +
+  theme(strip.text.x=element_text(size=20, color="black", face="bold"),
+        strip.text.y=element_text(size=20, color="black", face="bold"),
+        legend.position = "bottom",
+        plot.title = element_text(size=20),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 10), 
+        legend.key.size = grid::unit(0.8, "lines"),
+        legend.title = element_text(size = 0, hjust = 0)) +
+  scale_fill_manual(values = c(ColorNames[3],ColorNames[4])) + geom_text(aes(label=count), position = position_dodge(width = 0.8))
+
+EventTypes
+SavePPT(PPT, EventTypes, "SplicingEvents_NovelTranscriptome.pdf", 4, 3)
+
+rm(lr_suppa, gen_suppa, EventTypes, AllEvents)
+
+```
+
+### 4. Isoform SQANTI3 categories
+
+SQANTI3 classifies each isoform by finding the best matching reference transcript, in the following order:
+
+-   **FSM (Full Splice Match)**: meaning the reference and query isoform have the same number of exons and each internal junction agree. The exact 5' start and 3' end can differ by any amount.
+
+-   **ISM (Incomplete Splice Match)**: the query isoform has fewer 5' exons than the reference, but each internal junction agree. The exact 5' start and 3' end can differ by any amount.
+
+-   **NIC (Novel In Catalog)**: the query isoform does not have a FSM or ISM match, but is using a combination of known donor/acceptor sites.
+
+-   **NNC (Novel Not in Catalog)**: the query isoform does not have a FSM or ISM match, and has at least one donor or acceptor site that is not annotated.
+
+-   **Antisense**: the query isoform does not have overlap a same-strand reference gene but is anti-sense to an annotated gene.
+
+-   **Genic Intron**: the query isoform is completely contained within an annotated intron.
+
+-   **Genic Genomic**: the query isoform overlaps with introns and exons.
+
+-   **Intergenic**: the query isoform is in the intergenic region.
+
+```{r, echo=FALSE}
+#| label: fig-2E
+#| fig-cap: "SQANTI3 categories"
+#| layout-ncol: 1
+
+# SQANTI3 Classification
+SQANTI3_qc_Mon_classification=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt")
+
+# count number per category
+SQANTI3_qc_Mon_classification=SQANTI3_qc_Mon_classification %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="full-splice_match", "FSM")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="incomplete-splice_match", "ISM")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="novel_not_in_catalog", "NNC")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="novel_in_catalog", "NIC")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="antisense", "Antisense")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="genic", "Genic")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="intergenic", "Intergenic")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="fusion", "Read-through")) %>%
+  mutate(associated_transcript=if_else(str_detect(isoform, "-"), "novel", "annotated")) %>%
+  dplyr::mutate(associated_transcript=replace(associated_transcript, associated_transcript=="novel", "")) %>%
+  dplyr::mutate(associated_transcript=replace(associated_transcript, associated_transcript=="annotated", " - Different 5' and/or 3'")) %>%
+  dplyr::mutate(structural_category=paste0(structural_category, associated_transcript, sep="")) %>%
+  dplyr::group_by(structural_category) %>% # group by structural_category
+  dplyr::summarise(count = dplyr::n()) %>% # count number of events
+  dplyr::mutate(Proportion = 100*count/sum(count)) %>%
+  dplyr::mutate(structural_category_group=sub(" -.*", "", structural_category)) %>%
+  dplyr::mutate(Order = c(8,1,1,5,2,6,3,4,7)) 
+
+SQANTISplicing=ggplot(SQANTI3_qc_Mon_classification, aes(x = Proportion, y = reorder(structural_category_group, -Order), fill = structural_category)) + 
+  geom_bar(stat="identity") +
+  scale_fill_manual(values=c("FSM"="#BC3C29FF","FSM - Different 5' and/or 3'"="#BC3C29FF",
+                    "ISM"="#0072B5FF","NIC"="#E18727FF", "NNC"="#20854EFF",
+                    "Genic"="#7876B1FF","Intergenic"="#6F99ADFF","Read-through"="#FFDC91FF",
+                    "Antisense"="#EE4C97FF")) +
+  xlab(paste0("")) + 
+  ylab(paste0("Proportion(%)")) +
+  theme_classic() +
+  theme(strip.text.x=element_text(size=20, color="black", face="bold"),
+        strip.text.y=element_text(size=20, color="black", face="bold"),
+        legend.position = "none",
+        plot.title = element_text(size=20),
+        axis.title.x = element_text(size=15),
+        axis.title.y = element_text(size =15),
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        legend.text =  element_text(size = 15), 
+        legend.key.size = grid::unit(0.8, "lines"),
+        legend.title = element_text(size = 0, hjust = 0)) + geom_text(aes(label=round(Proportion,2)),
+                                                                      position = position_stack(vjust = 0.5))
+SQANTISplicing
+SavePPT(PPT, SQANTISplicing, "SQANTISplicing.pdf", 4, 3)
+
+print(paste0("New isoforms (FSM (different size UTR), ISM, NIC and NNC): ", round(sum(SQANTI3_qc_Mon_classification[grep("FSM - Different 5' and/or 3'|ISM|NIC|NNC", SQANTI3_qc_Mon_classification$structural_category),]$Proportion), 3),"%"))
+
+print(paste0("New isoforms (ISM, NIC and NNC): ", round(sum(SQANTI3_qc_Mon_classification[grep("ISM|NIC|NNC", SQANTI3_qc_Mon_classification$structural_category),]$Proportion), 3),"%"))
+
+print(paste0("New isoforms not in catalog (NIC and NNC): ", round(sum(SQANTI3_qc_Mon_classification[grep("NIC|NNC", SQANTI3_qc_Mon_classification$structural_category),]$Proportion),3),"%"))
+
+rm(SQANTI3_qc_Mon_classification, SQANTISplicing)
+
+```
+
+### 5. Annotated and novel isoforms per gene
+
+Number of novel vs previously annotated isoforms present in our Novel Transcriptome (so, expressed in monocytes LPS and/or 0h).
+
+```{r, echo=FALSE, warning=F}
+#| label: fig-2F
+#| fig-cap: "Novel and annotated isoforms per gene in the Isoform atlas"
+#| fig-subcap: 
+#|   - "Isoforms per gene"
+#| layout-ncol: 1
+
+### Transcript number
+IsoformNum=unique(FLAIR[,c(1,2)])
+
+# Count genes with at least one novel isoform
+GeneGroup <- unique(IsoformNum %>%
+  group_by(gene_id) %>%
+  mutate(HasAtLeastOneNovelIsoform = any(!grepl("^ENST", transcript_id))) %>%
+  ungroup() %>% select(gene_id,HasAtLeastOneNovelIsoform))
+print(table(GeneGroup$HasAtLeastOneNovelIsoform)/nrow(GeneGroup)*100)
+
+# prepare the matrix
+GenesGreaterNumNovelIsoforms=IsoformNum %>% 
+  mutate(Annotation=ifelse(grepl("^ENST", transcript_id), "annotated", "novel")) %>%
+  group_by(gene_id, Annotation) %>% # group by gene_id and annotation type
+  summarise(count = dplyr::n(), .groups = 'drop') %>% # count number of events
+  group_by(gene_id) %>%
+  pivot_wider(names_from = Annotation, values_from = count, values_fill = 0) %>%
+  mutate(Type = if_else(novel > annotated, "a.Greater number of novel\nthan annotated isoforms", "c.Greater number of annotated\nthan novel isoforms")) %>% ungroup() %>%
+  mutate(Type = if_else(novel == annotated, "b.Same number of novel\nand annotated isoforms", Type)) %>% ungroup() %>%
+  count(Type)
+
+PiePlot <- ggplot(GenesGreaterNumNovelIsoforms, aes(x = "", y = n, 
+                                         fill = Type)) +
+  geom_col(width = 1) +
+  coord_polar(theta = "y") +
+  theme_void() +
+  geom_text(aes(label = paste0(n, " (", round(n / sum(n) * 100), "%)")),
+            position = position_stack(vjust = 0.5)) + 
+  scale_fill_manual(values = c(ColorNames[7],ColorNames[8],"grey70"))
+PiePlot
+SavePPT(PPT, PiePlot, "PiePlotNumGenesGreaterNovelIsoforms.pdf", 4, 3)
+
+### Transcript number
+IsoformNum=rbind(unique(FLAIR[,c(1,2)]))
+
+# prepare the matrix
+IsoformNum=IsoformNum %>% 
+  mutate(Annotation=ifelse(grepl("^ENST", transcript_id), "annotated", "novel")) %>%
+  group_by(gene_id, Annotation) %>% # group by gene_id and annotation type
+  summarise(count = dplyr::n(), .groups = 'drop') %>% # count number of events
+  mutate(Interval=as.character(cut(count, breaks= c(-1,0,1,2,3,6,10,19,Inf)))) %>% 
+  # change the intervals
+  mutate(Interval=replace(Interval, Interval=="(-1,0]", "0")) %>%
+  mutate(Interval=replace(Interval, Interval=="(0,1]", "1")) %>%
+  mutate(Interval=replace(Interval, Interval=="(1,2]", "2")) %>%
+  mutate(Interval=replace(Interval, Interval=="(2,3]", "3")) %>%
+  mutate(Interval=replace(Interval, Interval=="(3,6]", "4-6")) %>%
+  mutate(Interval=replace(Interval, Interval=="(6,10]", "7-10")) %>%
+  mutate(Interval=replace(Interval, Interval=="(10,19]", "11-19")) %>%
+  mutate(Interval=replace(Interval, Interval=="(19,Inf]", "20+")) %>%
+  group_by(gene_id) %>% # group by gene id
+  # create the maxtrix to represent
+  pivot_wider(id_cols = c(gene_id), names_from = Annotation, values_from = Interval) %>%
+  mutate_at(2:3, ~replace_na(., "0")) %>% # substitute NA for 0 
+  mutate(annotated=replace(annotated, annotated=="7-10", "7+")) %>%
+  mutate(annotated=replace(annotated, annotated=="11-19", "7+")) %>%
+  mutate(annotated=replace(annotated, annotated=="20+", "7+")) %>%
+  group_by(annotated,novel) %>% # group by gene id
+  summarise(count = dplyr::n(), .groups = 'drop') # count number of events
+
+IsoformNum=rbind(IsoformNum, c(0,0,0))
+
+IsoformNum$novel=factor(IsoformNum$novel, levels=c("0","1","2","3","4-6","7-10","11-19","20+"))
+IsoformNum$annotated=factor(IsoformNum$annotated, levels=c("0","1","2","3","4-6","7+"))
+
+IsoformNum$count=as.numeric(as.vector(IsoformNum$count))
+breaksList = seq(-.1, 10, by = 0.1) # -.1 to ensure a break below 1 (otherwise value 1 becomes the white color too)
+LabelsBreaks = round(2^(breaksList),1)
+LabelsBreaks[!LabelsBreaks %in% c(1.0,4.0,16.0,64.0,256.0,1024.0)]=""
+LabelsBreaks[LabelsBreaks %in% "1024"]="1024+"
+
+IsoformNum$log2=round(log2(IsoformNum$count), 2)
+IsoformNumCount=ggplot(IsoformNum, aes(x=annotated, y=novel, fill=round(log2,2))) + 
+  geom_tile(color = "black") +
+  theme(axis.text = element_text(size = rel(1), face="bold"), 
+          strip.text = element_text(size = rel(0.75),face = "bold"), 
+          legend.position = "right",
+          legend.title = element_text(size = rel(1),face = "bold"), 
+          legend.text = element_text(size = rel(0.75),face = "bold"),
+          axis.title=element_text(size = rel(1.25),face = "bold"),
+          axis.text.x=element_text(size = rel(1), hjust=1, face="bold"),
+          panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black")) +
+    scale_fill_distiller("Number of genes", palette = "RdYlBu", breaks=breaksList, 
+                         limits=c(0,12), na.value = "white", 
+                         labels=LabelsBreaks) + 
+  xlab("Annotated transcripts") + ylab("Novel transcripts") + theme_minimal()
+
+IsoformNumCount
+SavePPT(PPT, IsoformNumCount, "IsoformNumCountGood.pdf", 4, 3)
+
+rm(IsoformNum, IsoformNumCount, breaksList, LabelsBreaks, ExtractInfoFromGTF)
+
+```
+
+### 6. Splice junction validation with SQANTI3
+
+Validation of novel splice junctions with Bulk-RNASeq data.
+
+```{r countmatrix_invitro, echo=F, include=FALSE}
+
+# OurData
+SQUANTIJunctions=fread("SQANTI3/FinalQC/Monocyte_Isoform_junctions.txt")
+SQUANTIAnnot=fread("FinalIsoformAnnotation/Monocyte_Isoforms_classification.final.txt")
+SQUANTIAnnot=SQUANTIAnnot[,c(1,6)]
+SQUANTIAnnot_Part_Ours=merge(SQUANTIJunctions, SQUANTIAnnot)
+SQUANTIAnnot_Part_Ours_Test=SQUANTIAnnot_Part_Ours[,c(1,2,3,4,5,6,21,63)]
+
+# Step 1: Add a new column to indicate if expression is greater than 0
+SQUANTIAnnot_Part_Ours_Test <- SQUANTIAnnot_Part_Ours_Test %>%
+  mutate(Validated = ifelse(total_coverage_unique > 0, "Yes", "No")) %>%
+  group_by(isoform, structural_category) %>%
+  summarise(All_Validated = ifelse(all(Validated == "Yes"), "Yes", "No")) %>%
+  ungroup() %>% 
+  group_by(structural_category) %>%
+  summarise(
+    Total_Isoforms = n(),
+    Validated_Count = sum(All_Validated == "Yes"),
+    Percentage_Validated = (Validated_Count / Total_Isoforms) * 100,
+    .groups = 'drop'
+  )
+SQUANTIAnnot_Part_Ours_Test
+
+# Published data
+SQUANTIJunctions=fread("SQANTI3/FinalQC_NewData/Monocyte_Isoform_NewData_junctions.txt")
+SQUANTIAnnot_Part_Published=merge(SQUANTIJunctions, SQUANTIAnnot)
+SQUANTIAnnot_Part_Published_Test=SQUANTIAnnot_Part_Published[,c(1,2,3,4,5,6,21,41)]
+
+# Step 1: Add a new column to indicate if expression is greater than 0
+SQUANTIAnnot_Part_Published_Test <- SQUANTIAnnot_Part_Published_Test %>%
+  mutate(Validated = ifelse(total_coverage_unique > 0, "Yes", "No")) %>%
+  group_by(isoform, structural_category) %>%
+  summarise(All_Validated = ifelse(all(Validated == "Yes"), "Yes", "No")) %>%
+  ungroup() %>% 
+  group_by(structural_category) %>%
+  summarise(
+    Total_Isoforms = n(),
+    Validated_Count = sum(All_Validated == "Yes"),
+    Percentage_Validated = (Validated_Count / Total_Isoforms) * 100,
+    .groups = 'drop'
+  )
+SQUANTIAnnot_Part_Published_Test
+
+# Select uniquely mapped read columns
+Col=colnames(SQUANTIAnnot_Part_Published)[grep("SJ.out_unique",colnames(SQUANTIAnnot_Part_Published))]
+Col=c(colnames(SQUANTIAnnot_Part_Published)[c(1,2,3,4,5,6,41)],Col)
+SQUANTIAnnot_Part_Published=SQUANTIAnnot_Part_Published[,..Col]
+
+AllSamples=merge(SQUANTIAnnot_Part_Ours, SQUANTIAnnot_Part_Published, all=T, by=c("isoform","chrom","strand","junction_number","genomic_start_coord","genomic_end_coord","structural_category"))
+
+# Step 1: Add a new column to indicate if expression is greater than 0
+AllSamples_Numbers <- AllSamples %>%
+  mutate(total_coverage_unique = rowSums(select(., contains("SJ.out_unique")))) %>%
+  mutate(Validated = ifelse(total_coverage_unique > 0, "Yes", "No")) %>%
+  group_by(isoform, structural_category) %>%
+  summarise(All_Validated = ifelse(all(Validated == "Yes"), "Yes", "No")) %>%
+  ungroup() %>% 
+  group_by(structural_category) %>%
+  summarise(
+    Total_Isoforms = n(),
+    Validated_Count = sum(All_Validated == "Yes"),
+    Percentage_Validated = (Validated_Count / Total_Isoforms) * 100,
+    .groups = 'drop'
+  )
+
+# count number per category
+AllSamples_Numbers=AllSamples_Numbers %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="full-splice_match", "FSM")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="incomplete-splice_match", "ISM")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="novel_not_in_catalog", "NNC")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="novel_in_catalog", "NIC")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="antisense", "Antisense")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="genic", "Genic")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="intergenic", "Intergenic")) %>%
+  dplyr::mutate(structural_category=replace(structural_category, structural_category=="fusion", "Read-through"))
+
+AllSamples_Numbers$structural_category=factor(AllSamples_Numbers$structural_category,
+                                              levels = c("FSM","ISM","NIC","NNC","Genic",
+                                                  "Intergenic","Antisense","Read-through"))
+
+SQUANTIValidated=ggplot(AllSamples_Numbers, aes(x = structural_category, y = Percentage_Validated, fill = structural_category)) + geom_bar(stat = "identity", position = "stack") + 
+  geom_text(aes(label = Validated_Count), 
+            position = position_stack(vjust = 0.5), color = "black") +
+  scale_fill_manual(values = ColorNames) +  # Custom colors for the bars
+  labs(y = "Percentatge", x = "Category") + theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"), 
+              legend.position = "none")
+
+SavePPT(PPT, SQUANTIValidated, "SQUANTIValidatedWithShortReads.pdf", 4, 3)
+
+```
+
+### 7. True TSSs
+
+```{r showplot, echo=F, include=FALSE}
+ 
+mem.maxVSize(vsize=999999999999999999)  # set max to 32 GB (if available)
+
+reads_manifestFile=fread("ReferenceGenome/metadata/reads_manifestFile.txt", header=F)
+
+Files=list.files("TTSs/")
+ReadsAligningGenes=data.table()
+
+for(FileName in Files){
+  SampleName=sub("Monocyte_IsoformsOverlap_","", sub(".bed","",FileName))
+  IntersectAnnotBam=fread(paste0("TTSs/",FileName)) %>% filter(V1 != ".") %>%
+    filter(V7 != ".") %>% filter(V1 == V7) %>% filter(V6 == V12) %>% 
+    select(V1, V2, V3, V4, V6, V7, V8, V9, V10, V12) %>%
+    dplyr::rename("read_chr" = "V1", "read_start" = "V2",  "read_end" = "V3",  
+                  "read_name" = "V4", "read_strand" = "V6", "isoform_chr" = "V7",
+                  "isoform_start" = "V8", "isoform_end" = "V9", "isoform_name" = "V10",
+                  "isoform_strand" = "V12") %>%
+    mutate(read_5p = if_else(read_strand == "+", read_start, read_end)) %>%
+    mutate(TSS_position = if_else(isoform_strand == "+", isoform_start, isoform_end)) %>%
+    mutate(distance_to_TSS = read_5p - TSS_position) %>%
+    group_by(read_name) %>%
+    slice_min(order_by = abs(distance_to_TSS), n = 1, with_ties = FALSE) %>% 
+    ungroup() %>% #select(distance_to_TSS) %>% 
+    mutate(Sample=sub(".bed", "", sub("Monocyte_IsoformsOverlap_", "", FileName)))
+
+    ReadsAligningGenes=rbind(ReadsAligningGenes,
+                             IntersectAnnotBam)
+}
+
+# Distance From TSS
+TotalDistanceTSS=ggplot(ReadsAligningGenes, aes(x = distance_to_TSS, 
+                        color = Sample, alpha = 0.05)) +
+  geom_density() + scale_color_manual(values = ColorNames[c(3:5, 7, 8, 2)]) +
+  scale_fill_manual(values = ColorNames[c(3:5, 7, 8, 2)]) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = c(-50, 50), color = "red", linetype = "dashed") +
+  labs(x = "Distance from TSS (bp)", y = "Read count") + theme_bw() +
+  theme(axis.text = element_text(size = rel(1)), 
+          strip.text = element_text(size = rel(0.75)), 
+          axis.title=element_text(size = rel(1.25)),
+          axis.text.x=element_text(size = rel(1)),
+          panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"))
+TotalDistanceTSS
+SavePPT(PPT, TotalDistanceTSS, "TotalDistanceTSS.pdf", 6, 4)
+
+
+TotalDistanceTSS=ggplot(ReadsAligningGenes, aes(x = distance_to_TSS, 
+                        color = Sample, alpha = 0.05)) +
+  geom_density() + scale_color_manual(values = ColorNames[c(3:5, 7, 8, 2)]) +
+  scale_fill_manual(values = ColorNames[c(3:5, 7, 8, 2)]) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = c(-50, 50), color = "red", linetype = "dashed") +
+  labs(x = "Distance from TSS (bp)", y = "Read count") + theme_bw() +
+  theme(axis.text = element_text(size = rel(1)), 
+          strip.text = element_text(size = rel(0.75)), 
+          axis.title=element_text(size = rel(1.25)),
+          axis.text.x=element_text(size = rel(1)),
+          panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black")) +
+  scale_x_continuous(limits = c(-500, 500))
+TotalDistanceTSS
+SavePPT(PPT, TotalDistanceTSS, "TotalDistanceTSS_small.pdf", 6, 4)
+
+
+TotalDistanceTSS=ggplot(ReadsAligningGenes, aes(x = distance_to_TSS, 
+                        color = Sample, alpha = 0.05)) +
+  geom_density() + scale_color_manual(values = ColorNames[c(3:5, 7, 8, 2)]) +
+  scale_fill_manual(values = ColorNames[c(3:5, 7, 8, 2)]) +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = c(-50, 50), color = "red", linetype = "dashed") +
+  labs(x = "Distance from TSS (bp)", y = "Read count") + theme_bw() +
+  theme(axis.text = element_text(size = rel(1)), 
+          strip.text = element_text(size = rel(0.75)), 
+          axis.title=element_text(size = rel(1.25)),
+          axis.text.x=element_text(size = rel(1)),
+          panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black")) +
+  scale_x_continuous(limits = c(-200, 200))
+TotalDistanceTSS
+SavePPT(PPT, TotalDistanceTSS, "TotalDistanceTSS_smaller.pdf", 6, 4)
+
+## Thresholds
+window_size <- 50
+readexpr <- 0
+
+# TSS cluster
+TSS_cluster <- ReadsAligningGenes %>% 
+  dplyr::count(Sample, isoform_chr, TSS_position, read_5p, name = "read_count") %>%
+  group_by(Sample, isoform_chr, TSS_position) %>%
+  dplyr::summarise(read_count = sum(read_count[abs(read_5p - TSS_position) <= window_size]),
+            read_5p = dplyr::first(TSS_position),
+            CountInTSS = "TSS", .groups = "drop")
+
+# Most internal position
+MostCountOutsideRegion <- ReadsAligningGenes %>%
+  dplyr::count(Sample, isoform_chr, TSS_position, read_5p, name = "read_count") %>%
+  dplyr::filter(abs(read_5p - TSS_position) > window_size) %>%
+  group_by(Sample, isoform_chr, TSS_position) %>%
+  slice_max(order_by = read_count, n = 1, with_ties = FALSE) %>%
+  mutate(CountInTSS = "MaximInternalPosition") %>%
+  ungroup()
+
+# Merge
+TSSMaxCount=rbind(TSS_cluster, MostCountOutsideRegion) %>%
+  select(Sample, isoform_chr, TSS_position, read_count, CountInTSS) %>% 
+  pivot_wider(values_from = read_count, names_from = CountInTSS) %>%
+  mutate(MaximInternalPosition = replace_na(MaximInternalPosition, 0)) %>%
+  filter(TSS + MaximInternalPosition >= readexpr) %>%
+  pivot_longer(values_to = "read_count", names_to = "PositionType", 
+               cols = c("TSS", "MaximInternalPosition")) %>%
+  mutate(log_read_count=log10(read_count+1))
+
+TSSMaxCount$PositionType=factor(TSSMaxCount$PositionType,
+                                levels=c("MaximInternalPosition", "TSS"))
+TSSMaxCount$Sample=factor(TSSMaxCount$Sample,
+                  levels =c("CAL8276", "PIC3822", "PIC4991",
+                            "CAL8302", "PIC3823", "PIC4992"))
+
+my_colors <- c(setNames(rep("#6F99ADFF", 
+                            sum(reads_manifestFile$V2 == "CD14sexVivo")),
+        as.character(reads_manifestFile$V1[reads_manifestFile$V2 == "CD14sexVivo"])),
+      setNames(rep("#BC3C29FF", sum(reads_manifestFile$V2 == "CD14s3hLPS")),
+        as.character(reads_manifestFile$V1[reads_manifestFile$V2 == "CD14s3hLPS"])))
+
+TSSMaxCount=TSSMaxCount %>% select(-log_read_count) %>%
+  group_by(isoform_chr, TSS_position, PositionType) %>%
+  summarise(total_read_count = sum(read_count, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(log_read_count=log10(total_read_count+1))
+
+Plot <- ggplot(TSSMaxCount, aes(x = PositionType, y = log_read_count, color = PositionType)) +
+  geom_boxplot() +   theme_bw() +
+  scale_color_manual(values = c(ColorNames[2], ColorNames[1])) +
+  stat_compare_means(paired = TRUE, method = "wilcox.test", label = "p.format") +
+  theme(legend.position = "none", axis.text = element_text(size = rel(0.5))) + 
+  theme(axis.text = element_text(size = rel(1)), 
+          strip.text = element_text(size = rel(0.75)), 
+          axis.title=element_text(size = rel(1.25)),
+          axis.text.x=element_text(size = rel(1)),
+          panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"))
+
+SavePPT(PPT, Plot, "MaxVsInternal.pdf", 4, 4)
+
+```
+
+### 8. Long-read length
+
+```{r showplot, echo=F, include=FALSE}
+ 
+metadata=fread("ReferenceGenome/metadata/reads_manifestFile.txt", header = F)
+
+Files=list.files("ReadLengthPerSample/")
+LentghReads=data.table()
+
+for(FileName in Files){
+  IntersectAnnotBam=fread(paste0("ReadLengthPerSample/",FileName)) 
+
+  LentghReads=rbind(LentghReads, data.frame(Lengths=IntersectAnnotBam$V1,
+                    Type=sub("3h","",sub("CD14s","",metadata[grep(sub(".fastq.*", "", FileName), metadata$V1),]$V2)),
+                    Num=sub("batch","",metadata[grep(sub(".fastq.*", "", FileName), metadata$V1),]$V3),
+                    Sample=paste0(sub("3h","",sub("CD14s","",metadata[grep(sub(".fastq.*", "", FileName), metadata$V1),]$V2)),
+                                  sub("batch","",metadata[grep(sub(".fastq.*", "", FileName), metadata$V1),]$V3))))
+}
+
+# Wilcoxon tests per Num
+wilcox_results <- LentghReads %>%
+  group_by(Num) %>% summarise(p.value = wilcox.test(Lengths ~ Type)$p.value, 
+                              .groups = "drop") %>%
+  mutate(label = paste0("p = ", signif(p.value, 3)), x = Inf, y = Inf)
+
+# Compute medians for vertical lines
+Mean <- LentghReads %>%
+  group_by(Num, Type) %>%
+  summarise(Mean = mean(Lengths), .groups = "drop")
+
+LentghReadsMerged=merge(LentghReads, wilcox_results, by="Num", all.x=T)
+
+LentghReadsMerged$Type=factor(LentghReadsMerged$Type,
+                                 levels=c("exVivo", "LPS"))
+
+LengthPlot=ggplot(LentghReadsMerged, aes(x = Lengths, fill = Type)) + 
+  geom_density(alpha=0.4) + 
+  geom_vline(data = Mean, aes(xintercept = Mean, color = Type), 
+             linetype = "dashed", linewidth = 1) +
+  facet_grid(Num~ ., scales = "free") + 
+  scale_color_manual(values = c(ColorNames[2], ColorNames[1])) +
+  scale_fill_manual(values  = c(ColorNames[2], ColorNames[1])) + theme_bw() +
+  scale_x_continuous(limits = c(0, 2000)) +
+  theme(axis.text = element_text(size = rel(1)), 
+          strip.text = element_text(size = rel(0.75)), 
+          legend.position = "right",
+          legend.title = element_text(size = rel(1)), 
+          legend.text = element_text(size = rel(0.75)),
+          axis.title=element_text(size = rel(1.25)),
+          axis.text.x=element_text(size = rel(1)),
+          panel.border = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), 
+          axis.line = element_line(colour = "black"))
+LengthPlot
+SavePPT(PPT, LengthPlot, "LengthPlot_PerDonnor.pdf", 9, 3.5)
+
+```
+
+```{r final, echo=FALSE, include=F, eval=F}
+
+print("Run all")
+print(PPT, target = "Fig2/Figure2.pptx")
+
+```
