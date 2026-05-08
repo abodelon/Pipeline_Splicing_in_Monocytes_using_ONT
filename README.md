@@ -1,9 +1,7 @@
 # Native long-read RNA sequencing of human monocytes reveals activation-induced alternative splicing toward functional isoforms
 
 ## Overview
-This repository contains the code used to perform the bioinformatics analysis from the manuscript:
-
-[Reference]
+This repository contains the code used to perform the bioinformatics analysis from the manuscript: Native long-read RNA sequencing of human monocytes reveals activation-induced alternative splicing toward functional isoforms.
 
 ## Abstract
 Alternative splicing is a key mechanism for expanding transcriptomic and proteomic complexity, yet its role in innate immune activation remains incompletely understood. Here, we applied Oxford Nanopore native RNA-sequencing to generate an isoform-level transcriptome of primary human monocytes before and after activation with lipopolysaccharide (LPS). We identify over 24,000 expressed isoforms, including thousands of previously unannotated variants. Activation with LPS induced widespread isoform-specific expression changes, leading to extensive isoform switching events, which were validated using matched short-read RNA-Seq. These activation-induced shifts enhanced transcript immune-regulatory functions: activated monocytes preferentially express longer, coding-competent isoforms with complete open reading frames, fewer retained introns, and increased domain complexity. By integrating matched Ribo-seq and proteomic data, we demonstrate that these isoform modulations are associated with enhanced translation of immune effector proteins. Together, our findings position alternative splicing as a dynamic and functional regulator of monocyte activation, emphasizing the need for isoform-level resolution to fully understand immune cell function and inflammation.
